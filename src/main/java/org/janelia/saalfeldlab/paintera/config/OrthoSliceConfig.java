@@ -3,63 +3,81 @@ package org.janelia.saalfeldlab.paintera.config;
 import org.janelia.saalfeldlab.paintera.viewer3d.OrthoSliceFX;
 
 import javafx.beans.property.BooleanProperty;
-import javafx.beans.property.SimpleBooleanProperty;
+import javafx.beans.property.LongProperty;
+import javafx.beans.value.ChangeListener;
 import javafx.beans.value.ObservableBooleanValue;
 
 public class OrthoSliceConfig
 {
 
-	private final BooleanProperty enable = new SimpleBooleanProperty( true );
+	private final OrthoSliceConfigBase baseConfig;
 
-	private final BooleanProperty showTopLeft = new SimpleBooleanProperty( true );
+	final ObservableBooleanValue isTopLeftVisible;
 
-	private final BooleanProperty showTopRight = new SimpleBooleanProperty( true );
+	final ObservableBooleanValue isTopRightVisible;
 
-	private final BooleanProperty showBottomLeft = new SimpleBooleanProperty( true );
+	final ObservableBooleanValue isBottomLeftVisible;
 
-	private final OrthoSliceFX topLeft;
-
-	private final OrthoSliceFX topRight;
-
-	private final OrthoSliceFX bottomLeft;
+	private final ObservableBooleanValue hasSources;
 
 	public OrthoSliceConfig(
-			final OrthoSliceFX topLeft,
-			final OrthoSliceFX topRight,
-			final OrthoSliceFX bottomLeft,
+			final OrthoSliceConfigBase baseConfig,
 			final ObservableBooleanValue isTopLeftVisible,
 			final ObservableBooleanValue isTopRightVisible,
 			final ObservableBooleanValue isBottomLeftVisible,
 			final ObservableBooleanValue hasSources )
 	{
 		super();
-		this.topLeft = topLeft;
-		this.topRight = topRight;
-		this.bottomLeft = bottomLeft;
-
-		this.topLeft.isVisibleProperty().bind( showTopLeft.and( enable ).and( hasSources ).and( isTopLeftVisible ) );
-		this.topRight.isVisibleProperty().bind( showTopRight.and( enable ).and( hasSources ).and( isTopRightVisible ) );
-		this.bottomLeft.isVisibleProperty().bind( showBottomLeft.and( enable ).and( hasSources ).and( isBottomLeftVisible ) );
+		this.baseConfig = baseConfig;
+		this.isTopLeftVisible = isTopLeftVisible;
+		this.isTopRightVisible = isTopRightVisible;
+		this.isBottomLeftVisible = isBottomLeftVisible;
+		this.hasSources = hasSources;
 	}
 
 	public BooleanProperty enableProperty()
 	{
-		return this.enable;
+		return this.baseConfig.isEnabledProperty();
 	}
 
 	public BooleanProperty showTopLeftProperty()
 	{
-		return this.showTopLeft;
+		return this.baseConfig.showTopLeftProperty();
 	}
 
 	public BooleanProperty showTopRightProperty()
 	{
-		return this.showTopRight;
+		return this.baseConfig.showTopRightProperty();
 	}
 
 	public BooleanProperty showBottomLeftProperty()
 	{
-		return this.showBottomLeft;
+		return this.baseConfig.showBottomLeftProperty();
+	}
+
+	public void bindOrthoSlicesToConifg(
+			final OrthoSliceFX topLeft,
+			final OrthoSliceFX topRight,
+			final OrthoSliceFX bottomLeft )
+	{
+		final BooleanProperty enable = baseConfig.isEnabledProperty();
+		topLeft.isVisibleProperty().bind( baseConfig.showTopLeftProperty().and( enable ).and( hasSources ).and( isTopLeftVisible ) );
+		topRight.isVisibleProperty().bind( baseConfig.showTopRightProperty().and( enable ).and( hasSources ).and( isTopRightVisible ) );
+		bottomLeft.isVisibleProperty().bind( baseConfig.showBottomLeftProperty().and( enable ).and( hasSources ).and( isBottomLeftVisible ) );
+		final ChangeListener< ? super Number > delayListener = ( obs, oldv, newv ) -> {
+			final long delay = newv.longValue() * 1000 * 1000;
+			topLeft.setDelay( delay );
+			topRight.setDelay( delay );
+			bottomLeft.setDelay( delay );
+		};
+		baseConfig.delayInNanoSeconds().addListener( delayListener );
+		delayListener.changed( null, 0, baseConfig.delayInNanoSeconds().get() );
+
+	}
+
+	public LongProperty delayInNanoSeconds()
+	{
+		return baseConfig.delayInNanoSeconds();
 	}
 
 }

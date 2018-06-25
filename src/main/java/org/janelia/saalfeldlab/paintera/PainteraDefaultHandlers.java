@@ -1,5 +1,6 @@
 package org.janelia.saalfeldlab.paintera;
 
+import java.lang.invoke.MethodHandles;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -10,12 +11,17 @@ import java.util.function.Consumer;
 
 import org.janelia.saalfeldlab.fx.event.EventFX;
 import org.janelia.saalfeldlab.fx.event.KeyTracker;
+import org.janelia.saalfeldlab.fx.event.MouseTracker;
+import org.janelia.saalfeldlab.fx.ortho.GridConstraintsManager;
+import org.janelia.saalfeldlab.fx.ortho.GridConstraintsManager.MaximizedColumn;
+import org.janelia.saalfeldlab.fx.ortho.GridConstraintsManager.MaximizedRow;
 import org.janelia.saalfeldlab.fx.ortho.GridResizer;
 import org.janelia.saalfeldlab.fx.ortho.OnEnterOnExit;
 import org.janelia.saalfeldlab.fx.ortho.OrthogonalViews;
 import org.janelia.saalfeldlab.fx.ortho.OrthogonalViews.ViewerAndTransforms;
-import org.janelia.saalfeldlab.fx.ortho.ResizableGridPane2x2;
 import org.janelia.saalfeldlab.fx.ortho.ViewerAxis;
+import org.janelia.saalfeldlab.paintera.control.CurrentSourceRefreshMeshes;
+import org.janelia.saalfeldlab.paintera.control.CurrentSourceVisibilityToggle;
 import org.janelia.saalfeldlab.paintera.control.FitToInterval;
 import org.janelia.saalfeldlab.paintera.control.Merges;
 import org.janelia.saalfeldlab.paintera.control.Navigation;
@@ -24,6 +30,7 @@ import org.janelia.saalfeldlab.paintera.control.OrthogonalViewsValueDisplayListe
 import org.janelia.saalfeldlab.paintera.control.Paint;
 import org.janelia.saalfeldlab.paintera.control.RunWhenFirstElementIsAdded;
 import org.janelia.saalfeldlab.paintera.control.Selection;
+import org.janelia.saalfeldlab.paintera.control.ShowOnlySelectedInStreamToggle;
 import org.janelia.saalfeldlab.paintera.control.navigation.AffineTransformWithListeners;
 import org.janelia.saalfeldlab.paintera.control.navigation.DisplayTransformUpdateOnResize;
 import org.janelia.saalfeldlab.paintera.state.SourceInfo;
@@ -31,6 +38,8 @@ import org.janelia.saalfeldlab.paintera.ui.ARGBStreamSeedSetter;
 import org.janelia.saalfeldlab.paintera.ui.ToggleMaximize;
 import org.janelia.saalfeldlab.paintera.ui.opendialog.PainteraOpenDialogEventHandler;
 import org.janelia.saalfeldlab.paintera.viewer3d.Viewer3DFX;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import bdv.fx.viewer.MultiBoxOverlayRendererFX;
 import bdv.fx.viewer.ViewerPanelFX;
@@ -39,15 +48,16 @@ import bdv.viewer.Source;
 import javafx.beans.binding.Bindings;
 import javafx.beans.binding.BooleanBinding;
 import javafx.beans.binding.IntegerBinding;
-import javafx.beans.property.BooleanProperty;
 import javafx.beans.property.ObjectProperty;
 import javafx.beans.property.ReadOnlyBooleanProperty;
-import javafx.beans.property.SimpleBooleanProperty;
 import javafx.beans.value.ChangeListener;
+import javafx.beans.value.ObservableBooleanValue;
 import javafx.beans.value.ObservableObjectValue;
 import javafx.scene.Node;
+import javafx.scene.control.ContextMenu;
 import javafx.scene.input.KeyCode;
 import javafx.scene.input.KeyEvent;
+import javafx.scene.input.MouseButton;
 import javafx.scene.input.MouseEvent;
 import javafx.scene.layout.Pane;
 import net.imglib2.FinalRealInterval;
@@ -58,10 +68,14 @@ import net.imglib2.util.Intervals;
 public class PainteraDefaultHandlers
 {
 
+	private static final Logger LOG = LoggerFactory.getLogger( MethodHandles.lookup().lookupClass() );
+
 	private final PainteraBaseView baseView;
 
 	@SuppressWarnings( "unused" )
 	private final KeyTracker keyTracker;
+
+	private final MouseTracker mouseTracker;
 
 	private final OrthogonalViews< Viewer3DFX > orthogonalViews;
 
@@ -97,13 +111,19 @@ public class PainteraDefaultHandlers
 
 	private final GridResizer resizer;
 
+	private final ObservableBooleanValue bottomLeftNeedsZNormal;
+
 	public PainteraDefaultHandlers(
 			final PainteraBaseView baseView,
 			final KeyTracker keyTracker,
-			final BorderPaneWithStatusBars paneWithStatus )
+			final MouseTracker mouseTracker,
+			final BorderPaneWithStatusBars paneWithStatus,
+			final String projectDirectory,
+			final GridConstraintsManager gridConstraintsManager )
 	{
 		this.baseView = baseView;
 		this.keyTracker = keyTracker;
+		this.mouseTracker = mouseTracker;
 		this.orthogonalViews = baseView.orthogonalViews();
 		this.sourceInfo = baseView.sourceInfo();
 		this.numSources = Bindings.size( sourceInfo.trackSources() );
@@ -129,12 +149,12 @@ public class PainteraDefaultHandlers
 				baseView.orthogonalViews().topRight().viewer(),
 				baseView.orthogonalViews().bottomLeft().viewer() );
 
-		this.openDialogHandler = addPainteraOpenDialogHandler( baseView, keyTracker, KeyCode.CONTROL, KeyCode.O );
+		this.openDialogHandler = addPainteraOpenDialogHandler( baseView, keyTracker, projectDirectory, KeyCode.CONTROL, KeyCode.O );
 
-		this.toggleMaximizeTopLeft = toggleMaximizeNode( orthogonalViews.grid(), 0, 0 );
-		this.toggleMaximizeTopRight = toggleMaximizeNode( orthogonalViews.grid(), 1, 0 );
-		this.toggleMaximizeBottomLeft = toggleMaximizeNode( orthogonalViews.grid(), 0, 1 );
-		this.toggleMaximizeBottomRight = toggleMaximizeNode( orthogonalViews.grid(), 1, 1 );
+		this.toggleMaximizeTopLeft = toggleMaximizeNode( gridConstraintsManager, 0, 0 );
+		this.toggleMaximizeTopRight = toggleMaximizeNode( gridConstraintsManager, 1, 0 );
+		this.toggleMaximizeBottomLeft = toggleMaximizeNode( gridConstraintsManager, 0, 1 );
+		this.toggleMaximizeBottomRight = toggleMaximizeNode( gridConstraintsManager, 1, 1 );
 
 		viewerToTransforms.put( orthogonalViews.topLeft().viewer(), orthogonalViews.topLeft() );
 		viewerToTransforms.put( orthogonalViews.topRight().viewer(), orthogonalViews.topRight() );
@@ -164,7 +184,7 @@ public class PainteraDefaultHandlers
 		EventFX.KEY_PRESSED( "cycle current source", e -> sourceInfo.incrementCurrentSourceIndex(), e -> keyTracker.areOnlyTheseKeysDown( KeyCode.CONTROL, KeyCode.TAB ) ).installInto( borderPane );
 		EventFX.KEY_PRESSED( "backwards cycle current source", e -> sourceInfo.decrementCurrentSourceIndex(), e -> keyTracker.areOnlyTheseKeysDown( KeyCode.CONTROL, KeyCode.SHIFT, KeyCode.TAB ) ).installInto( borderPane );
 
-		this.resizer = new GridResizer( baseView.orthogonalViews().grid().constraintsManager(), 5, baseView.pane(), keyTracker );
+		this.resizer = new GridResizer( gridConstraintsManager, 5, baseView.pane(), keyTracker );
 		this.resizer.installInto( baseView.pane() );
 
 		final ObjectProperty< Source< ? > > currentSource = sourceInfo.currentSourceProperty();
@@ -189,24 +209,50 @@ public class PainteraDefaultHandlers
 		EventFX.KEY_PRESSED( "maximize", e -> toggleMaximizeBottomLeft.toggleFullScreen(), e -> keyTracker.areOnlyTheseKeysDown( KeyCode.M ) ).installInto( orthogonalViews.bottomLeft().viewer() );
 		EventFX.KEY_PRESSED( "maximize", e -> toggleMaximizeBottomRight.toggleFullScreen(), e -> keyTracker.areOnlyTheseKeysDown( KeyCode.M ) ).installInto( baseView.viewer3D() );
 
-		final BooleanProperty isRowMaximized = new SimpleBooleanProperty( false );
-		isRowMaximized.addListener( ( obs, oldv, newv ) -> {
-			if ( newv )
-			{
-				orthogonalViews.bottomLeft().globalToViewerTransform().setTransform( ViewerAxis.globalToViewer( ViewerAxis.Z ) );
-				orthogonalViews.topLeft().viewer().setVisible( false );
-				orthogonalViews.topRight().viewer().setVisible( false );
-				orthogonalViews.grid().constraintsManager().maximize( 1, 0 );
-			}
-			else
-			{
-				orthogonalViews.bottomLeft().globalToViewerTransform().setTransform( ViewerAxis.globalToViewer( ViewerAxis.Y ) );
-				orthogonalViews.topLeft().viewer().setVisible( true );
-				orthogonalViews.topRight().viewer().setVisible( true );
-				orthogonalViews.grid().constraintsManager().resetToLast();
-			}
-		} );
-		EventFX.KEY_PRESSED( "maximize bottom row", e -> isRowMaximized.set( !isRowMaximized.get() ), e -> keyTracker.areOnlyTheseKeysDown( KeyCode.M, KeyCode.SHIFT ) ).installInto( paneWithStatus.getPane() );
+		final CurrentSourceVisibilityToggle csv = new CurrentSourceVisibilityToggle( sourceInfo.currentState() );
+		EventFX.KEY_PRESSED( "toggle visibility", e -> csv.toggleIsVisible(), e -> keyTracker.areOnlyTheseKeysDown( KeyCode.V ) ).installInto( borderPane );
+
+		final ShowOnlySelectedInStreamToggle sosist = new ShowOnlySelectedInStreamToggle( sourceInfo.currentState()::get, sourceInfo.removedSourcesTracker() );
+		EventFX.KEY_PRESSED( "toggle non-selected labels visibility", e -> sosist.toggleNonSelectionVisibility(), e -> keyTracker.areOnlyTheseKeysDown( KeyCode.SHIFT, KeyCode.V ) ).installInto( borderPane );
+
+		EventFX.KEY_PRESSED(
+				"toggle maximize bottom row",
+				e -> {
+					gridConstraintsManager.maximize( MaximizedRow.BOTTOM, 0 );
+				},
+				e -> keyTracker.areOnlyTheseKeysDown( KeyCode.M, KeyCode.SHIFT ) ).installInto( paneWithStatus.getPane() );
+
+		bottomLeftNeedsZNormal = Bindings.createBooleanBinding(
+				() -> MaximizedColumn.NONE.equals( gridConstraintsManager.getMaximizedColumn() ) && MaximizedRow.BOTTOM.equals( gridConstraintsManager.getMaximizedRow() ),
+				gridConstraintsManager.observeMaximizedColumn(),
+				gridConstraintsManager.observeMaximizedRow() );
+
+		final AffineTransformWithListeners bottomLeftGlobalToViewer = orthogonalViews.bottomLeft().globalToViewerTransform();
+		bottomLeftNeedsZNormal.addListener( ( obs, oldv, newv ) -> bottomLeftGlobalToViewer.setTransform( ViewerAxis.globalToViewer( newv ? ViewerAxis.Z : ViewerAxis.Y ) ) );
+
+		if ( gridConstraintsManager.isFullScreen() && GridConstraintsManager.MaximizedRow.BOTTOM.equals( gridConstraintsManager.getMaximizedRow() ) && GridConstraintsManager.MaximizedColumn.NONE.equals( gridConstraintsManager.getMaximizedColumn() ) )
+		{
+			orthogonalViews.bottomLeft().globalToViewerTransform().setTransform( ViewerAxis.globalToViewer( ViewerAxis.Z ) );
+		}
+
+		final CurrentSourceRefreshMeshes meshRefresher = new CurrentSourceRefreshMeshes( sourceInfo.currentState()::get );
+		EventFX.KEY_PRESSED( "refresh meshes", e -> meshRefresher.refresh(), e -> keyTracker.areOnlyTheseKeysDown( KeyCode.R ) ).installInto( paneWithStatus.getPane() );
+
+		// TODO does MouseEvent.getPickResult make the coordinate tracker
+		// obsolete?
+		final MeshesGroupContextMenu contextMenuFactory = new MeshesGroupContextMenu( baseView.manager(), baseView.viewer3D().coordinateTracker() );
+		baseView.viewer3D().addEventHandler(
+				MouseEvent.MOUSE_CLICKED,
+				e -> {
+					LOG.debug( "Handling event {}", e );
+					if ( MouseButton.SECONDARY.equals( e.getButton() ) && e.getClickCount() == 1 && !mouseTracker.isDragging() )
+					{
+						LOG.debug( "Check passed for event {}", e );
+						e.consume();
+						final ContextMenu menu = contextMenuFactory.createMenu();
+						menu.show( baseView.viewer3D(), e.getScreenX(), e.getScreenY() );
+					}
+				} );
 
 	}
 
@@ -317,6 +363,7 @@ public class PainteraDefaultHandlers
 	public static PainteraOpenDialogEventHandler addPainteraOpenDialogHandler(
 			final PainteraBaseView baseView,
 			final KeyTracker keyTracker,
+			final String projectDirectory,
 			final KeyCode... triggers )
 	{
 
@@ -325,22 +372,27 @@ public class PainteraDefaultHandlers
 		final PainteraOpenDialogEventHandler handler = new PainteraOpenDialogEventHandler(
 				baseView,
 				baseView.orthogonalViews().sharedQueue(),
-				e -> keyTracker.areOnlyTheseKeysDown( triggers ) );
+				e -> keyTracker.areOnlyTheseKeysDown( triggers ),
+				projectDirectory );
 		baseView.pane().addEventHandler( KeyEvent.KEY_PRESSED, handler );
 		return handler;
 
 	}
 
 	public static ToggleMaximize toggleMaximizeNode(
-			final ResizableGridPane2x2< ?, ?, ?, ? > grid,
+			final GridConstraintsManager manager,
 			final int column,
 			final int row )
 	{
 		return new ToggleMaximize(
-				grid.getChildAt( column, row ),
-				grid.pane().getChildren(),
-				grid.constraintsManager(),
-				column, row );
+				manager,
+				MaximizedColumn.fromIndex( column ),
+				MaximizedRow.fromIndex( row ) );
+	}
+
+	public Navigation navigation()
+	{
+		return this.navigation;
 	}
 
 }

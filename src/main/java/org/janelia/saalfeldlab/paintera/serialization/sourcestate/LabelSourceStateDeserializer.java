@@ -2,28 +2,24 @@ package org.janelia.saalfeldlab.paintera.serialization.sourcestate;
 
 import java.io.IOException;
 import java.lang.invoke.MethodHandles;
-import java.util.function.Function;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Optional;
 import java.util.function.IntFunction;
-import java.util.function.LongFunction;
 import java.util.function.Supplier;
 
 import org.janelia.saalfeldlab.n5.N5Writer;
 import org.janelia.saalfeldlab.paintera.N5Helpers;
-import org.janelia.saalfeldlab.paintera.PainteraBaseView;
 import org.janelia.saalfeldlab.paintera.composition.Composite;
 import org.janelia.saalfeldlab.paintera.control.assignment.FragmentSegmentAssignmentState;
-import org.janelia.saalfeldlab.paintera.control.assignment.FragmentsInSelectedSegments;
+import org.janelia.saalfeldlab.paintera.control.assignment.action.AssignmentAction;
+import org.janelia.saalfeldlab.paintera.control.lock.LockedSegmentsOnlyLocal;
 import org.janelia.saalfeldlab.paintera.control.selection.SelectedIds;
-import org.janelia.saalfeldlab.paintera.control.selection.SelectedSegments;
 import org.janelia.saalfeldlab.paintera.data.DataSource;
 import org.janelia.saalfeldlab.paintera.data.mask.MaskedSource;
 import org.janelia.saalfeldlab.paintera.data.n5.N5DataSource;
-import org.janelia.saalfeldlab.paintera.id.ToIdConverter;
-import org.janelia.saalfeldlab.paintera.meshes.InterruptibleFunction;
-import org.janelia.saalfeldlab.paintera.meshes.MeshInfos;
-import org.janelia.saalfeldlab.paintera.meshes.MeshManagerWithAssignmentForSegments;
-import org.janelia.saalfeldlab.paintera.meshes.cache.CacheUtils;
-import org.janelia.saalfeldlab.paintera.meshes.cache.SegmentMaskGenerators;
+import org.janelia.saalfeldlab.paintera.id.IdService;
+import org.janelia.saalfeldlab.paintera.meshes.ManagedMeshSettings;
 import org.janelia.saalfeldlab.paintera.serialization.FragmentSegmentAssignmentOnlyLocalSerializer;
 import org.janelia.saalfeldlab.paintera.serialization.StatefulSerializer;
 import org.janelia.saalfeldlab.paintera.serialization.StatefulSerializer.Arguments;
@@ -34,17 +30,14 @@ import org.janelia.saalfeldlab.paintera.stream.HighlightingStreamConverter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.google.gson.JsonArray;
 import com.google.gson.JsonDeserializationContext;
 import com.google.gson.JsonObject;
 
-import gnu.trove.set.hash.TLongHashSet;
-import javafx.beans.property.SimpleDoubleProperty;
-import javafx.beans.property.SimpleIntegerProperty;
-import net.imglib2.Interval;
 import net.imglib2.type.numeric.ARGBType;
 
 public class LabelSourceStateDeserializer< C extends HighlightingStreamConverter< ? > >
-extends SourceStateSerialization.SourceStateDeserializerWithoutDependencies< LabelSourceState< ?, ? >, C >
+		extends SourceStateSerialization.SourceStateDeserializerWithoutDependencies< LabelSourceState< ?, ? >, C >
 {
 
 	private static final Logger LOG = LoggerFactory.getLogger( MethodHandles.lookup().lookupClass() );
@@ -56,6 +49,8 @@ extends SourceStateSerialization.SourceStateDeserializerWithoutDependencies< Lab
 	public static final String FRAGMENTS_KEY = "fragments";
 
 	public static final String SEGMENTS_KEY = "segments";
+
+	public static final String LOCKED_SEGMENTS_KEY = "lockedSegments";
 
 	private final Arguments arguments;
 
@@ -108,61 +103,62 @@ extends SourceStateSerialization.SourceStateDeserializerWithoutDependencies< Lab
 
 		final N5DataSource< ?, ? > n5Source = ( N5DataSource< ?, ? > ) ( isMaskedSource
 				? ( ( MaskedSource< ?, ? > ) source ).underlyingSource()
-						: source );
+				: source );
 
 		final N5Writer writer = n5Source.writer();
 		final String dataset = n5Source.dataset();
 
 		final SelectedIds selectedIds = context.deserialize( map.get( SELECTED_IDS_KEY ), SelectedIds.class );
+		final long[] locallyLockedSegments = Optional
+				.ofNullable( map.get( LOCKED_SEGMENTS_KEY ) )
+				.map( el -> ( long[] ) context.deserialize( el, long[].class ) )
+				.orElseGet( () -> new long[] {} );
 		final JsonObject assignmentMap = map.get( ASSIGNMENT_KEY ).getAsJsonObject();
+		final IdService idService = N5Helpers.idService( writer, dataset );
 		final FragmentSegmentAssignmentState assignment = N5Helpers.assignments(
 				writer,
-				dataset,
-				context.deserialize( assignmentMap.get( FragmentSegmentAssignmentOnlyLocalSerializer.FRAGMENTS_KEY ), long[].class ),
-				context.deserialize( assignmentMap.get( FragmentSegmentAssignmentOnlyLocalSerializer.FRAGMENTS_KEY ), long[].class ) );
+				dataset );
 
-		final SelectedSegments selectedSegments = new SelectedSegments( selectedIds, assignment );
-		final FragmentsInSelectedSegments fragmentsInSelectedSegments = new FragmentsInSelectedSegments( selectedSegments, assignment );
+		if ( assignmentMap != null && assignmentMap.has( FragmentSegmentAssignmentOnlyLocalSerializer.ACTIONS_KEY ) )
+		{
+			final JsonArray serializedActions = assignmentMap.get( FragmentSegmentAssignmentOnlyLocalSerializer.ACTIONS_KEY ).getAsJsonArray();
+			final List< AssignmentAction > actions = new ArrayList<>();
+			for ( int i = 0; i < serializedActions.size(); ++i )
+			{
+				final JsonObject entry = serializedActions.get( i ).getAsJsonObject();
+				final AssignmentAction.Type type = context.deserialize( entry.get( FragmentSegmentAssignmentOnlyLocalSerializer.TYPE_KEY ), AssignmentAction.Type.class );
+				final AssignmentAction action = context.deserialize( entry.get( FragmentSegmentAssignmentOnlyLocalSerializer.DATA_KEY ), type.getClassForType() );
+				actions.add( action );
+			}
+			assignment.apply( actions );
+		}
+
+		final LockedSegmentsOnlyLocal lockedSegments = new LockedSegmentsOnlyLocal( locked -> {}, locallyLockedSegments );
 
 		final AbstractHighlightingARGBStream stream = converter.getStream();
-		stream.setHighlightsAndAssignment( selectedIds, assignment );
-		final LongFunction< ? > maskGenerator = PainteraBaseView.equalsMaskForType( source.getDataType() );
-		final Function< TLongHashSet, ? > segmentMaskGenerator = SegmentMaskGenerators.forType( source.getDataType() );
+		stream.setHighlightsAndAssignmentAndLockedSegments( selectedIds, assignment, lockedSegments );
 
-		final InterruptibleFunction< Long, Interval[] >[] blockCaches = PainteraBaseView.generateLabelBlocksForLabelCache( n5Source, PainteraBaseView.scaleFactorsFromAffineTransforms( source ) );
-		final InterruptibleFunction[] meshCache = CacheUtils.segmentMeshCacheLoaders(
-				( DataSource ) source,
-				(Function) segmentMaskGenerator,
-				CacheUtils::toCacheSoftRefLoaderCache );
-		LOG.debug( "Meshses group: {}", arguments.meshesGroup );
-		final MeshManagerWithAssignmentForSegments meshManager = new MeshManagerWithAssignmentForSegments(
-				source,
-				blockCaches,
-				meshCache,
-				arguments.meshesGroup,
-				assignment,
-				selectedSegments,
-				stream,
-				new SimpleIntegerProperty(),
-				new SimpleDoubleProperty(),
-				new SimpleIntegerProperty(),
-				arguments.meshManagerExecutors,
-				arguments.meshWorkersExecutors );
-		final MeshInfos meshInfos = new MeshInfos( selectedSegments, assignment, meshManager, source.getNumMipmapLevels() );
-
-		return new LabelSourceState(
+		final LabelSourceState state = new LabelSourceState(
 				source,
 				converter,
 				composite,
 				name,
-				maskGenerator,
-				segmentMaskGenerator,
 				assignment,
-				ToIdConverter.fromType( source.getDataType() ),
+				lockedSegments,
+				idService,
 				selectedIds,
-				N5Helpers.idService( writer, dataset ),
-				meshManager,
-				meshInfos );
+				arguments.meshesGroup,
+				arguments.meshManagerExecutors,
+				arguments.meshWorkersExecutors );
+
+		if ( map.has( LabelSourceStateSerializer.MANAGED_MESH_SETTINGS_KEY ) )
+		{
+			final ManagedMeshSettings meshSettings = context.deserialize(
+					map.get( LabelSourceStateSerializer.MANAGED_MESH_SETTINGS_KEY ),
+					ManagedMeshSettings.class );
+			state.managedMeshSettings().set( meshSettings );
+		}
+		return state;
 
 	}
 

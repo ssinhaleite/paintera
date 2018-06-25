@@ -1,41 +1,46 @@
 package org.janelia.saalfeldlab.paintera;
 
+import java.io.File;
 import java.io.IOException;
 import java.lang.invoke.MethodHandles;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
+import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
+import org.janelia.saalfeldlab.fx.event.EventFX;
 import org.janelia.saalfeldlab.fx.event.KeyTracker;
+import org.janelia.saalfeldlab.fx.event.MouseTracker;
+import org.janelia.saalfeldlab.fx.ortho.GridConstraintsManager;
 import org.janelia.saalfeldlab.fx.ortho.OrthogonalViews;
 import org.janelia.saalfeldlab.n5.N5Reader;
 import org.janelia.saalfeldlab.n5.N5Writer;
+import org.janelia.saalfeldlab.paintera.SaveProject.ProjectUndefined;
 import org.janelia.saalfeldlab.paintera.composition.ARGBCompositeAlphaYCbCr;
 import org.janelia.saalfeldlab.paintera.composition.CompositeCopy;
+import org.janelia.saalfeldlab.paintera.config.CoordinateConfigNode;
+import org.janelia.saalfeldlab.paintera.config.NavigationConfigNode;
+import org.janelia.saalfeldlab.paintera.config.OrthoSliceConfig;
+import org.janelia.saalfeldlab.paintera.control.CommitChanges;
 import org.janelia.saalfeldlab.paintera.control.assignment.FragmentSegmentAssignmentState;
+import org.janelia.saalfeldlab.paintera.control.assignment.UnableToPersist;
+import org.janelia.saalfeldlab.paintera.control.lock.LockedSegmentsOnlyLocal;
 import org.janelia.saalfeldlab.paintera.control.selection.SelectedIds;
-import org.janelia.saalfeldlab.paintera.control.selection.SelectedSegments;
 import org.janelia.saalfeldlab.paintera.data.DataSource;
+import org.janelia.saalfeldlab.paintera.data.mask.CannotPersist;
 import org.janelia.saalfeldlab.paintera.data.mask.Masks;
-import org.janelia.saalfeldlab.paintera.data.mask.TmpDirectoryCreator;
 import org.janelia.saalfeldlab.paintera.data.n5.CommitCanvasN5;
-import org.janelia.saalfeldlab.paintera.id.ToIdConverter;
-import org.janelia.saalfeldlab.paintera.meshes.InterruptibleFunction;
-import org.janelia.saalfeldlab.paintera.meshes.MeshInfos;
-import org.janelia.saalfeldlab.paintera.meshes.MeshManagerWithAssignmentForSegments;
-import org.janelia.saalfeldlab.paintera.meshes.ShapeKey;
-import org.janelia.saalfeldlab.paintera.meshes.cache.CacheUtils;
-import org.janelia.saalfeldlab.paintera.meshes.cache.SegmentMaskGenerators;
+import org.janelia.saalfeldlab.paintera.id.IdService;
 import org.janelia.saalfeldlab.paintera.serialization.GsonHelpers;
 import org.janelia.saalfeldlab.paintera.serialization.Properties;
 import org.janelia.saalfeldlab.paintera.state.LabelSourceState;
 import org.janelia.saalfeldlab.paintera.state.RawSourceState;
-import org.janelia.saalfeldlab.paintera.state.SourceInfo;
 import org.janelia.saalfeldlab.paintera.state.SourceState;
 import org.janelia.saalfeldlab.paintera.stream.HighlightingStreamConverter;
 import org.janelia.saalfeldlab.paintera.stream.ModalGoldenAngleSaturatedHighlightingARGBStream;
 import org.janelia.saalfeldlab.paintera.viewer3d.Viewer3DFX;
+import org.janelia.saalfeldlab.util.MakeUnchecked;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -43,24 +48,18 @@ import com.google.gson.GsonBuilder;
 import com.google.gson.JsonObject;
 
 import bdv.viewer.ViewerOptions;
-import gnu.trove.set.hash.TLongHashSet;
 import javafx.application.Application;
 import javafx.application.Platform;
-import javafx.beans.property.SimpleDoubleProperty;
-import javafx.beans.property.SimpleIntegerProperty;
 import javafx.scene.Scene;
-import javafx.scene.control.ButtonBar.ButtonData;
-import javafx.scene.control.ButtonType;
-import javafx.scene.control.Dialog;
-import javafx.stage.Screen;
+import javafx.scene.input.KeyCode;
+import javafx.scene.input.MouseEvent;
 import javafx.stage.Stage;
-import net.imglib2.Interval;
+import javafx.stage.WindowEvent;
 import net.imglib2.Volatile;
 import net.imglib2.converter.ARGBColorConverter;
 import net.imglib2.realtransform.AffineTransform3D;
 import net.imglib2.type.NativeType;
 import net.imglib2.type.numeric.RealType;
-import net.imglib2.util.Pair;
 import picocli.CommandLine;
 
 public class Paintera extends Application
@@ -68,10 +67,57 @@ public class Paintera extends Application
 
 	private static final Logger LOG = LoggerFactory.getLogger( MethodHandles.lookup().lookupClass() );
 
-	private static final String PAINTERA_KEY = "paintera";
+	public static final String PAINTERA_KEY = "paintera";
+
+	public enum Error
+	{
+		NO_PROJECT_SPECIFIED( 1, "No Paintera project specified" );
+		;
+		public final int code;
+
+		public final String description;
+
+		private Error( final int code, final String description )
+		{
+			this.code = code;
+			this.description = description;
+		}
+	}
 
 	@Override
 	public void start( final Stage stage ) throws Exception
+	{
+		try
+		{
+			try
+			{
+				startImpl( stage );
+			}
+			catch ( final RuntimeException re )
+			{
+				final Throwable cause = re.getCause();
+				if ( cause != null && cause instanceof Exception )
+				{
+					throw ( Exception ) cause;
+				}
+				else
+				{
+					throw re;
+				}
+			}
+		}
+		catch ( final ProjectDirectoryNotSpecified e )
+		{
+			LOG.error( Error.NO_PROJECT_SPECIFIED.description );
+			System.exit( Error.NO_PROJECT_SPECIFIED.code );
+		}
+		catch ( final LockFile.UnableToCreateLock e )
+		{
+			LockFileAlreadyExistsDialog.showDialog( e );
+		}
+	}
+
+	public void startImpl( final Stage stage ) throws Exception
 	{
 
 		final Parameters parameters = getParameters();
@@ -80,52 +126,120 @@ public class Paintera extends Application
 		final boolean parsedSuccessfully = Optional.ofNullable( CommandLine.call( painteraArgs, System.err, args ) ).orElse( false );
 		Platform.setImplicitExit( true );
 
+		// TODO introduce and throw appropriate exception instead of call to
+		// Platform.exit
 		if ( !parsedSuccessfully )
 		{
 			Platform.exit();
 			return;
 		}
 
+		final double[] screenScales = painteraArgs.screenScales();
+		LOG.debug( "Using screen scales {}", screenScales );
+
+		final String projectDir = Optional
+				.ofNullable( painteraArgs.project() )
+				.orElseGet( MakeUnchecked.supplier( () -> new ProjectDirectoryNotSpecifiedDialog( painteraArgs.defaultToTempDirectory() )
+						.showDialog( "No project directory specified on command line. You can specify a project directory or start Paintera without specifying a project directory." ).get() ) );
+
+		final LockFile lockFile = new LockFile( new File( projectDir, ".paintera" ), "lock" );
+		lockFile.lock();
+		stage.addEventHandler( WindowEvent.WINDOW_HIDDEN, e -> lockFile.remove() );
+
 		final PainteraBaseView baseView = new PainteraBaseView(
 				Math.min( 8, Math.max( 1, Runtime.getRuntime().availableProcessors() / 2 ) ),
-				ViewerOptions.options().screenScales( screenScales() ),
+				ViewerOptions.options().screenScales( screenScales ),
 				si -> s -> si.getState( s ).interpolationProperty().get() );
 
 		final OrthogonalViews< Viewer3DFX > orthoViews = baseView.orthogonalViews();
 
 		final KeyTracker keyTracker = new KeyTracker();
+		final MouseTracker mouseTracker = new MouseTracker();
 
 		final BorderPaneWithStatusBars paneWithStatus = new BorderPaneWithStatusBars(
 				baseView,
-				keyTracker );
+				() -> projectDir );
 
-		@SuppressWarnings( "unused" )
-		final PainteraDefaultHandlers defaultHandlers = new PainteraDefaultHandlers( baseView, keyTracker, paneWithStatus );
+		final GridConstraintsManager gridConstraintsManager = new GridConstraintsManager();
+		baseView.orthogonalViews().grid().manage( gridConstraintsManager );
+
+		final PainteraDefaultHandlers defaultHandlers = new PainteraDefaultHandlers(
+				baseView,
+				keyTracker,
+				mouseTracker,
+				paneWithStatus,
+				projectDir,
+				gridConstraintsManager );
+
+		final NavigationConfigNode navigationConfigNode = paneWithStatus.navigationConfigNode();
+
+		final CoordinateConfigNode coordinateConfigNode = navigationConfigNode.coordinateConfigNode();
+		coordinateConfigNode.listen( baseView.manager() );
 
 		// populate everything
 
-		final Optional< JsonObject > loadedProperties = loadPropertiesIfPresent( painteraArgs.project() );
+		final Optional< JsonObject > loadedProperties = loadPropertiesIfPresent( projectDir );
 
 		// TODO this can probably be hidden in
 		// Properties.fromSerializedProperties
 		final Map< Integer, SourceState< ?, ? > > indexToState = new HashMap<>();
 
-		final Properties properties = loadedProperties.map( lp -> Properties.fromSerializedProperties( lp, baseView, true, painteraArgs::project, indexToState ) ).orElse( new Properties( baseView ) );
+		final Properties properties = loadedProperties
+				.map( lp -> Properties.fromSerializedProperties( lp, baseView, true, () -> projectDir, indexToState, gridConstraintsManager ) )
+				.orElse( new Properties( baseView, gridConstraintsManager ) );
+
+		paneWithStatus.crosshairConfigNode().bind( properties.crosshairConfig );
+		properties.crosshairConfig.bindCrosshairsToConfig( paneWithStatus.crosshairs().values() );
+
+		final OrthoSliceConfig orthoSliceConfig = new OrthoSliceConfig(
+				properties.orthoSliceConfig,
+				baseView.orthogonalViews().topLeft().viewer().visibleProperty(),
+				baseView.orthogonalViews().topRight().viewer().visibleProperty(),
+				baseView.orthogonalViews().bottomLeft().viewer().visibleProperty(),
+				baseView.sourceInfo().hasSources() );
+		paneWithStatus.orthoSliceConfigNode().bind( orthoSliceConfig );
+		orthoSliceConfig.bindOrthoSlicesToConifg(
+				paneWithStatus.orthoSlices().get( baseView.orthogonalViews().topLeft() ),
+				paneWithStatus.orthoSlices().get( baseView.orthogonalViews().topRight() ),
+				paneWithStatus.orthoSlices().get( baseView.orthogonalViews().bottomLeft() ) );
+
+		paneWithStatus.navigationConfigNode().bind( properties.navigationConfig );
+		properties.navigationConfig.bindNavigationToConfig( defaultHandlers.navigation() );
+
+		paneWithStatus.viewer3DConfigNode().bind( properties.viewer3DConfig );
+		properties.viewer3DConfig.bindViewerToConfig( baseView.viewer3D() );
+
+//		gridConstraintsManager.set( properties.gridConstraints );
+
+		paneWithStatus.saveProjectButtonOnActionProperty().set( event -> {
+			try
+			{
+				SaveProject.persistProperties( projectDir, properties, GsonHelpers.builderWithAllRequiredSerializers( baseView, () -> projectDir ).setPrettyPrinting() );
+			}
+			catch ( final IOException e )
+			{
+				LOG.error( "Unable to save project", e );
+			}
+			catch ( final ProjectUndefined e )
+			{
+				LOG.error( "Project undefined" );
+			}
+		} );
 
 		// TODO this should probably happen in the properties.populate:
 		properties.sourceInfo
-		.trackSources()
-		.stream()
-		.map( properties.sourceInfo::getState )
-		.filter( state -> state instanceof LabelSourceState< ?, ? > )
-		.map( state -> ( LabelSourceState< ?, ? > ) state )
-		.forEach( state -> {
-			final long[] selIds = state.selectedIds().getActiveIds();
-			final long lastId = state.selectedIds().getLastSelection();
-			state.selectedIds().deactivateAll();
-			state.selectedIds().activate( selIds );
-			state.selectedIds().activateAlso( lastId );
-		} );
+				.trackSources()
+				.stream()
+				.map( properties.sourceInfo::getState )
+				.filter( state -> state instanceof LabelSourceState< ?, ? > )
+				.map( state -> ( LabelSourceState< ?, ? > ) state )
+				.forEach( state -> {
+					final long[] selIds = state.selectedIds().getActiveIds();
+					final long lastId = state.selectedIds().getLastSelection();
+					state.selectedIds().deactivateAll();
+					state.selectedIds().activate( selIds );
+					state.selectedIds().activateAlso( lastId );
+				} );
 		properties.clean();
 
 		LOG.debug( "Adding {} raw sources: {}", painteraArgs.rawSources().length, painteraArgs.rawSources() );
@@ -137,7 +251,7 @@ public class Paintera extends Application
 		LOG.debug( "Adding {} label sources: {}", painteraArgs.labelSources().length, painteraArgs.labelSources() );
 		for ( final String source : painteraArgs.labelSources() )
 		{
-			addLabelFromString( baseView, source );
+			addLabelFromString( baseView, source, projectDir );
 		}
 
 		properties.windowProperties.widthProperty.set( painteraArgs.width( properties.windowProperties.widthProperty.get() ) );
@@ -152,50 +266,47 @@ public class Paintera extends Application
 		}
 
 		setFocusTraversable( orthoViews, false );
-		stage.setOnCloseRequest( event -> {
+		stage.setOnCloseRequest( new SaveOnExitDialog( baseView, properties, projectDir, baseView::stop ) );
 
-			if ( properties.isDirty() )
-			{
-				final Dialog< ButtonType > d = new Dialog<>();
-				d.setHeaderText( "Save before exit?" );
-				final ButtonType saveButton = new ButtonType( "Yes", ButtonData.OK_DONE );
-				final ButtonType discardButton = new ButtonType( "No", ButtonData.NO );
-				final ButtonType cancelButton = new ButtonType( "Cancel", ButtonData.CANCEL_CLOSE );
-				d.getDialogPane().getButtonTypes().setAll( saveButton, discardButton, cancelButton );
-				final ButtonType response = d.showAndWait().orElse( ButtonType.CANCEL );
-
-				if ( cancelButton.equals( response ) )
-				{
-					LOG.debug( "Canceling close request." );
-					event.consume();
-					return;
-				}
-
-				if ( saveButton.equals( response ) )
-				{
-					LOG.debug( "Saving project before exit" );
+		EventFX.KEY_PRESSED(
+				"save project",
+				e -> {
+					e.consume();
 					try
 					{
-						persistProperties( painteraArgs.project(), properties, GsonHelpers.builderWithAllRequiredSerializers( baseView, painteraArgs::project ).setPrettyPrinting() );
+						SaveProject.persistProperties( projectDir, properties, GsonHelpers.builderWithAllRequiredSerializers( baseView, () -> projectDir ).setPrettyPrinting() );
 					}
-					catch ( final IOException e )
+					catch ( final IOException e1 )
 					{
-						LOG.error( "Unable to write project! Select NO in dialog to close." );
-						event.consume();
-						return;
+						LOG.error( "Unable to safe project", e1 );
 					}
-				}
-				else if ( discardButton.equals( response ) )
-				{
-					LOG.debug( "Discarding project changes" );
-				}
+					catch ( final ProjectUndefined e1 )
+					{
+						LOG.error( "Project undefined" );
+					}
+				},
+				e -> keyTracker.areOnlyTheseKeysDown( KeyCode.CONTROL, KeyCode.S ) ).installInto( paneWithStatus.getPane() );
 
+		EventFX.KEY_PRESSED( "commit", e -> {
+			LOG.debug( "Showing commit dialog" );
+			e.consume();
+			try
+			{
+				CommitChanges.commit( new CommitDialog(), baseView.sourceInfo().currentState().get() );
 			}
-
-			baseView.stop();
-		} );
+			catch ( final CannotPersist e1 )
+			{
+				LOG.error( "Unable to persist canvas: {}", e1.getMessage() );
+			}
+			catch ( final UnableToPersist e1 )
+			{
+				LOG.error( "Unable to persist fragment-segment-assignment: {}", e1.getMessage() );
+			}
+		},
+				e -> keyTracker.areOnlyTheseKeysDown( KeyCode.CONTROL, KeyCode.C ) ).installInto( paneWithStatus.getPane() );
 
 		keyTracker.installInto( scene );
+		scene.addEventFilter( MouseEvent.ANY, mouseTracker );
 		stage.setScene( scene );
 		stage.setWidth( properties.windowProperties.widthProperty.get() );
 		stage.setHeight( properties.windowProperties.heightProperty.get() );
@@ -263,11 +374,14 @@ public class Paintera extends Application
 		return Optional.empty();
 	}
 
-	private static < D extends NativeType< D >, T extends Volatile< D > & NativeType< T > > void addLabelFromString( final PainteraBaseView pbv, final String identifier ) throws UnableToAddSource
+	private static < D extends NativeType< D >, T extends Volatile< D > & NativeType< T > > void addLabelFromString(
+			final PainteraBaseView pbv,
+			final String identifier,
+			final String projectDirectory ) throws UnableToAddSource
 	{
 		if ( !Pattern.matches( "^[a-z]+://.+", identifier ) )
 		{
-			addLabelFromString( pbv, "file://" + identifier );
+			addLabelFromString( pbv, "file://" + identifier, projectDirectory );
 			return;
 		}
 
@@ -278,14 +392,20 @@ public class Paintera extends Application
 				final String[] split = identifier.replaceFirst( "file://", "" ).split( ":" );
 				final N5Writer n5 = N5Helpers.n5Writer( split[ 0 ], 64, 64, 64 );
 				final String dataset = split[ 1 ];
-				final double[] resolution = Optional.ofNullable( n5.getAttribute( dataset, "resolution", double[].class ) ).orElse( new double[] { 1.0, 1.0, 1.0 } );
-				final double[] offset = Optional.ofNullable( n5.getAttribute( dataset, "offset", double[].class ) ).orElse( new double[] { 0.0, 0.0, 0.0 } );
+				LOG.warn( "Adding label dataset={} dataset={}", split[ 0 ], dataset );
+				final double[] resolution = N5Helpers.getResolution( n5, dataset );
+				final double[] offset = N5Helpers.getOffset( n5, dataset );
 				final AffineTransform3D transform = N5Helpers.fromResolutionAndOffset( resolution, offset );
-				final TmpDirectoryCreator nextCanvasDir = new TmpDirectoryCreator( null, null );
+				final Supplier< String > nextCanvasDir = Masks.canvasTmpDirDirectorySupplier( projectDirectory );
 				final String name = N5Helpers.lastSegmentOfDatasetPath( dataset );
 				final SelectedIds selectedIds = new SelectedIds();
+				final IdService idService = N5Helpers.idService( n5, dataset );
 				final FragmentSegmentAssignmentState assignment = N5Helpers.assignments( n5, dataset );
-				final ModalGoldenAngleSaturatedHighlightingARGBStream stream = new ModalGoldenAngleSaturatedHighlightingARGBStream( selectedIds, assignment );
+				final LockedSegmentsOnlyLocal lockedSegments = new LockedSegmentsOnlyLocal( locked -> {} );
+				final ModalGoldenAngleSaturatedHighlightingARGBStream stream = new ModalGoldenAngleSaturatedHighlightingARGBStream(
+						selectedIds,
+						assignment,
+						lockedSegments );
 				final DataSource< D, T > dataSource = N5Helpers.openAsLabelSource(
 						n5,
 						dataset,
@@ -301,50 +421,18 @@ public class Paintera extends Application
 						new CommitCanvasN5( n5, dataset ),
 						pbv.getPropagationQueue() );
 
-				final InterruptibleFunction< Long, Interval[] >[] blockListCache =
-						PainteraBaseView.generateLabelBlocksForLabelCache( maskedSource );
-
-				final InterruptibleFunction< ShapeKey< TLongHashSet >, Pair< float[], float[] > >[] meshCache =
-						CacheUtils.segmentMeshCacheLoaders(
-								maskedSource,
-								SegmentMaskGenerators.forType( dataSource.getDataType() ),
-								CacheUtils::toCacheSoftRefLoaderCache );
-
-				final SelectedSegments selectedSegments = new SelectedSegments( selectedIds, assignment );
-
-				final MeshManagerWithAssignmentForSegments meshManager = new MeshManagerWithAssignmentForSegments(
-						maskedSource,
-						blockListCache,
-						meshCache,
-						pbv.viewer3D().meshesGroup(),
-						assignment,
-						selectedSegments,
-						stream,
-						new SimpleIntegerProperty(),
-						new SimpleDoubleProperty(),
-						new SimpleIntegerProperty(),
-						pbv.getMeshManagerExecutorService(),
-						pbv.getMeshWorkerExecutorService() );
-
-				final MeshInfos< TLongHashSet > meshInfos = new MeshInfos< >(
-						selectedSegments,
-						assignment,
-						meshManager,
-						maskedSource.getNumMipmapLevels() );
-
 				final LabelSourceState< D, T > state = new LabelSourceState<>(
 						maskedSource,
 						HighlightingStreamConverter.forType( stream, dataSource.getType() ),
 						new ARGBCompositeAlphaYCbCr(),
 						name,
-						PainteraBaseView.equalsMaskForType( dataSource.getDataType() ),
-						SegmentMaskGenerators.forType( dataSource.getDataType() ),
 						assignment,
-						ToIdConverter.fromType( dataSource.getDataType() ),
+						lockedSegments,
+						idService,
 						selectedIds,
-						N5Helpers.idService( n5, dataset ),
-						meshManager,
-						meshInfos );
+						pbv.viewer3D().meshesGroup(),
+						pbv.getMeshManagerExecutorService(),
+						pbv.getMeshWorkerExecutorService() );
 				pbv.addLabelSource( state );
 			}
 			catch ( final Exception e )
@@ -352,25 +440,6 @@ public class Paintera extends Application
 				throw e instanceof UnableToAddSource ? ( UnableToAddSource ) e : new UnableToAddSource( e );
 			}
 		}
-	}
-
-	private static double[] screenScales()
-	{
-
-		final int maxSize = ( int ) Screen
-				.getScreens()
-				.stream()
-				.map( Screen::getVisualBounds )
-				.mapToDouble( b -> Math.max( b.getWidth(), b.getHeight() ) )
-				.max()
-				.orElse( 0.0 );
-
-		LOG.debug( "max screen size = {}", maxSize );
-
-		final double[] screenScales = maxSize < 2500
-				? new double[] { 1.0 / 1.0, 1.0 / 2.0, 1.0 / 4.0, 1.0 / 8.0 }
-		: new double[] { 1.0 / 2.0, 1.0 / 4.0, 1.0 / 8.0, 1.0 / 16.0 };
-				return screenScales;
 	}
 
 	public static Optional< JsonObject > loadPropertiesIfPresent( final String root )
@@ -389,13 +458,6 @@ public class Paintera extends Application
 		{
 			return Optional.empty();
 		}
-	}
-
-	public static void persistProperties( final String root, final Properties properties, final GsonBuilder builder ) throws IOException
-	{
-		builder.create().getAdapter( SourceInfo.class );
-		LOG.debug( "Persisting properties {} into {}", properties, root );
-		N5Helpers.n5Writer( root, builder, 64, 64, 64 ).setAttribute( "", PAINTERA_KEY, properties );
 	}
 
 }

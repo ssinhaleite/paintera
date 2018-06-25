@@ -4,9 +4,9 @@ import java.lang.invoke.MethodHandles;
 import java.util.Optional;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
-import java.util.function.Function;
 
 import org.janelia.saalfeldlab.fx.util.InvokeOnJavaFXApplicationThread;
+import org.janelia.saalfeldlab.paintera.meshes.MeshGeneratorJobManager.ManagementTask;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -29,6 +29,8 @@ import javafx.scene.Group;
 import javafx.scene.Node;
 import javafx.scene.paint.Color;
 import javafx.scene.paint.PhongMaterial;
+import javafx.scene.shape.CullFace;
+import javafx.scene.shape.DrawMode;
 import javafx.scene.shape.MeshView;
 import net.imglib2.Interval;
 import net.imglib2.type.numeric.ARGBType;
@@ -42,6 +44,10 @@ import net.imglib2.util.Pair;
 public class MeshGenerator< T >
 {
 	private static final Logger LOG = LoggerFactory.getLogger( MethodHandles.lookup().lookupClass() );
+
+	public static int RETRIEVING_RELEVANT_BLOCKS = -1;
+
+	public static int SUBMITTED_MESH_GENERATION_TASK = -2;
 
 	public static class BlockListKey
 	{
@@ -90,7 +96,7 @@ public class MeshGenerator< T >
 
 	private final T id;
 
-	private final InterruptibleFunction< Long, Interval[] >[] blockListCache;
+	private final InterruptibleFunction< T, Interval[] >[] blockListCache;
 
 	private final InterruptibleFunction< ShapeKey< T >, Pair< float[], float[] > >[] meshCache;
 
@@ -106,15 +112,19 @@ public class MeshGenerator< T >
 
 	private final ObservableValue< Color > color;
 
-	private final ObjectProperty< Group > root = new SimpleObjectProperty<>();
+	private final ObservableValue< Color > colorWithAlpha;
+
+	private final Group root;
+
+	private final BooleanProperty isEnabled = new SimpleBooleanProperty( true );
 
 	private final ExecutorService managers;
 
 	private final ExecutorService workers;
 
-	private final Function< T, long[] > getIds;
+	private final ObjectProperty< Future< Void > > activeFuture = new SimpleObjectProperty<>();
 
-	private final ObjectProperty< Future< Void > > activeTask = new SimpleObjectProperty<>();
+	private final ObjectProperty< MeshGeneratorJobManager< T >.ManagementTask > activeTask = new SimpleObjectProperty<>();
 
 	private final IntegerProperty submittedTasks = new SimpleIntegerProperty( 0 );
 
@@ -128,10 +138,19 @@ public class MeshGenerator< T >
 
 	private final IntegerProperty smoothingIterations = new SimpleIntegerProperty( 5 );
 
+	private final DoubleProperty opacity = new SimpleDoubleProperty( 1.0 );
+
+	private final ObjectProperty< DrawMode > drawMode = new SimpleObjectProperty<>( DrawMode.FILL );
+
+	private final ObjectProperty< CullFace > cullFace = new SimpleObjectProperty<>( CullFace.FRONT );
+
+	private final DoubleProperty inflate = new SimpleDoubleProperty( 1.0 );
+
 	//
 	public MeshGenerator(
+			final Group root,
 			final T segmentId,
-			final InterruptibleFunction< Long, Interval[] >[] blockListCache,
+			final InterruptibleFunction< T, Interval[] >[] blockListCache,
 			final InterruptibleFunction< ShapeKey< T >, Pair< float[], float[] > >[] meshCache,
 			final ObservableIntegerValue color,
 			final int scaleIndex,
@@ -139,8 +158,7 @@ public class MeshGenerator< T >
 			final double smoothingLambda,
 			final int smoothingIterations,
 			final ExecutorService managers,
-			final ExecutorService workers,
-			final Function< T, long[] > getIds )
+			final ExecutorService workers )
 	{
 		super();
 		this.id = segmentId;
@@ -150,7 +168,7 @@ public class MeshGenerator< T >
 		this.managers = managers;
 		this.workers = workers;
 		this.manager = new MeshGeneratorJobManager<>( this.meshes, this.managers, this.workers );
-		this.getIds = getIds;
+		this.colorWithAlpha = Bindings.createObjectBinding( () -> this.color.getValue().deriveColor( 0, 1.0, 1.0, this.opacity.get() ), this.color, this.opacity );
 
 		this.changed.addListener( ( obs, oldv, newv ) -> new Thread( () -> this.updateMeshes( newv ) ).start() );
 		this.changed.addListener( ( obs, oldv, newv ) -> changed.set( false ) );
@@ -167,19 +185,19 @@ public class MeshGenerator< T >
 		this.smoothingIterations.set( smoothingIterations );
 		this.smoothingIterations.addListener( ( obs, oldv, newv ) -> changed.set( true ) );
 
-		this.root.addListener( ( obs, oldv, newv ) -> {
+		this.root = root;
+
+		this.isEnabled.addListener( ( obs, oldv, newv ) -> {
 			InvokeOnJavaFXApplicationThread.invoke( () -> {
 				synchronized ( this.meshes )
 				{
-					Optional.ofNullable( oldv ).ifPresent( g -> this.meshes.forEach( ( id, mesh ) -> g.getChildren().remove( mesh ) ) );
-					Optional.ofNullable( newv ).ifPresent( g -> this.meshes.forEach( ( id, mesh ) -> g.getChildren().add( mesh ) ) );
-				}
-				if ( newv == null )
-				{
-					synchronized ( this.activeTask )
+					if ( newv )
 					{
-						Optional.ofNullable( this.activeTask.get() ).ifPresent( f -> f.cancel( true ) );
-						this.activeTask.set( null );
+						this.root.getChildren().addAll( this.meshes.values() );
+					}
+					else
+					{
+						this.root.getChildren().removeAll( this.meshes.values() );
 					}
 				}
 			} );
@@ -190,57 +208,68 @@ public class MeshGenerator< T >
 			{
 				( ( PhongMaterial ) change.getValueRemoved().getMaterial() ).diffuseColorProperty().unbind();
 				change.getValueRemoved().visibleProperty().unbind();
+				change.getValueRemoved().drawModeProperty().unbind();
+				change.getValueRemoved().cullFaceProperty().unbind();
+				change.getValueRemoved().scaleXProperty().unbind();
+				change.getValueRemoved().scaleYProperty().unbind();
+				change.getValueRemoved().scaleZProperty().unbind();
 			}
 			else
 			{
-				( ( PhongMaterial ) change.getValueAdded().getMaterial() ).diffuseColorProperty().bind( this.color );
+				( ( PhongMaterial ) change.getValueAdded().getMaterial() ).diffuseColorProperty().bind( this.colorWithAlpha );
 				change.getValueAdded().visibleProperty().bind( this.isVisible );
+				change.getValueAdded().drawModeProperty().bind( this.drawMode );
+				change.getValueAdded().cullFaceProperty().bind( this.cullFace );
+				change.getValueAdded().scaleXProperty().bind( this.inflate );
+				change.getValueAdded().scaleYProperty().bind( this.inflate );
+				change.getValueAdded().scaleZProperty().bind( this.inflate );
 			}
 
-			Optional.ofNullable( this.root.get() ).ifPresent( group -> {
-				if ( change.wasRemoved() )
-				{
-					InvokeOnJavaFXApplicationThread.invoke( synchronize( () -> group.getChildren().remove( change.getValueRemoved() ), group ) );
-				}
-				else if ( change.wasAdded() && !group.getChildren().contains( change.getValueAdded() ) )
-				{
-					InvokeOnJavaFXApplicationThread.invoke( () -> {
-						synchronized ( group )
+			if ( change.wasRemoved() )
+			{
+				InvokeOnJavaFXApplicationThread.invoke( () -> this.root.getChildren().remove( change.getValueRemoved() ) );
+//					InvokeOnJavaFXApplicationThread.invoke( synchronize( () -> this.root.getChildren().remove( change.getValueRemoved() ), this.root ) );
+			}
+			else if ( change.wasAdded() && !this.root.getChildren().contains( change.getValueAdded() ) )
+			{
+				InvokeOnJavaFXApplicationThread.invoke( () -> {
+					if ( this.root != null && this.isEnabled.get() )
+					{
+						final ObservableList< Node > children = this.root.getChildren();
+						if ( !children.contains( change.getValueAdded() ) )
 						{
-							final ObservableList< Node > children = group.getChildren();
-							if ( !children.contains( change.getValueAdded() ) )
-							{
-								LOG.debug( "Adding children: {}", change.getValueAdded() );
-								children.add( change.getValueAdded() );
-							}
+							LOG.debug( "Adding children: {}", change.getValueAdded() );
+							children.add( change.getValueAdded() );
 						}
-					} );
-				}
-			} );
+					}
+				} );
+			}
 		} );
-
 		this.changed.set( true );
+	}
+
+	public void interrupt()
+	{
+		synchronized ( this.activeFuture )
+		{
+			LOG.warn( "Canceling task: {}", this.activeFuture );
+			Optional.ofNullable( activeFuture.get() ).ifPresent( f -> f.cancel( true ) );
+			Optional.ofNullable( activeTask.get() ).ifPresent( ManagementTask::interrupt );
+			activeFuture.set( null );
+			activeTask.set( null );
+		}
 	}
 
 	private void updateMeshes( final boolean doUpdate )
 	{
-		LOG.warn( "Updating mesh? {}", doUpdate );
+		LOG.debug( "Updating mesh? {}", doUpdate );
 		if ( !doUpdate ) { return; }
 
-		synchronized ( this.activeTask )
+		synchronized ( this.activeFuture )
 		{
-			LOG.debug( "Canceling task: {}", this.activeTask );
-			Optional.ofNullable( activeTask.get() ).ifPresent( f -> f.cancel( true ) );
-			activeTask.set( null );
+			interrupt();
 			final int scaleIndex = this.scaleIndex.get();
-			final Runnable onFinish = () -> {
-				synchronized ( activeTask )
-				{
-					activeTask.set( null );
-				}
-			};
-			final Future< Void > task = manager.submit(
-					getIds.apply( id ),
+			final Pair< Future< Void >, MeshGeneratorJobManager< T >.ManagementTask > futureAndTask = manager.submit(
 					id,
 					scaleIndex,
 					meshSimplificationIterations.intValue(),
@@ -250,9 +279,10 @@ public class MeshGenerator< T >
 					meshCache[ scaleIndex ],
 					submittedTasks::set,
 					completedTasks::set,
-					onFinish );
-			LOG.debug( "Submitting new task {}", task );
-			this.activeTask.set( task );
+					() -> {} );
+			LOG.debug( "Submitting new task {}", futureAndTask );
+			this.activeFuture.set( futureAndTask.getA() );
+			this.activeTask.set( futureAndTask.getB() );
 		}
 	}
 
@@ -266,9 +296,9 @@ public class MeshGenerator< T >
 		return id;
 	}
 
-	public ObjectProperty< Group > rootProperty()
+	public BooleanProperty isEnabledProperty()
 	{
-		return this.root;
+		return this.isEnabled;
 	}
 
 	public Runnable synchronize( final Runnable r, final Object syncObject )
@@ -298,6 +328,7 @@ public class MeshGenerator< T >
 
 	public IntegerProperty scaleIndexProperty()
 	{
+		LOG.debug( "Querying scale index property {}", this.scaleIndex );
 		return this.scaleIndex;
 	}
 
@@ -314,6 +345,45 @@ public class MeshGenerator< T >
 	public ObservableIntegerValue successfulTasksProperty()
 	{
 		return this.successfulTasks;
+	}
+
+	public DoubleProperty opacityProperty()
+	{
+		return this.opacity;
+	}
+
+	public ObjectProperty< DrawMode > drawModeProperty()
+	{
+		return this.drawMode;
+	}
+
+	public ObjectProperty< CullFace > cullFaceProperty()
+	{
+		return this.cullFace;
+	}
+
+	public DoubleProperty inflateProperty()
+	{
+		return this.inflate;
+	}
+
+	public BooleanProperty isVisibleProperty()
+	{
+		return this.isVisible;
+	}
+
+	public void bindTo( final MeshSettings meshSettings )
+	{
+		LOG.debug( "Binding to {}", meshSettings );
+		opacityProperty().bind( meshSettings.opacityProperty() );
+		scaleIndexProperty().bind( meshSettings.scaleLevelProperty() );
+		meshSimplificationIterationsProperty().bind( meshSettings.simplificationIterationsProperty() );
+		cullFaceProperty().bind( meshSettings.cullFaceProperty() );
+		drawModeProperty().bind( meshSettings.drawModeProperty() );
+		smoothingIterationsProperty().bind( meshSettings.smoothingIterationsProperty() );
+		smoothingLambdaProperty().bind( meshSettings.smoothingLambdaProperty() );
+		inflateProperty().bind( meshSettings.inflateProperty() );
+		isVisible.bind( meshSettings.isVisibleProperty() );
 	}
 
 }

@@ -1,5 +1,11 @@
 package org.janelia.saalfeldlab.paintera.config;
 
+import java.util.Arrays;
+import java.util.Collection;
+
+import org.janelia.saalfeldlab.paintera.ui.Crosshair;
+import org.janelia.saalfeldlab.util.Colors;
+
 import javafx.beans.property.BooleanProperty;
 import javafx.beans.property.ObjectProperty;
 import javafx.beans.property.SimpleBooleanProperty;
@@ -10,9 +16,9 @@ import javafx.scene.paint.Color;
 public class CrosshairConfig
 {
 
-	public static final Color DEFAULT_ON_FOCUS_COLOR = Color.WHITE;
+	public static final Color DEFAULT_ON_FOCUS_COLOR = Colors.CREMI;
 
-	public static final Color DEFAULT_OUT_OF_FOCUS_COLOR = Color.GRAY;
+	public static final Color DEFAULT_OUT_OF_FOCUS_COLOR = Color.WHITE.deriveColor( 0, 1, 1, 0.5 );
 
 	private final ObjectProperty< Color > onFocusColor = new SimpleObjectProperty<>( DEFAULT_ON_FOCUS_COLOR );
 
@@ -76,5 +82,22 @@ public class CrosshairConfig
 	public ObservableBooleanValue wasChanged()
 	{
 		return this.wasChanged();
+	}
+
+	public void bindCrosshairsToConfig( final Collection< Crosshair > crosshairs )
+	{
+		crosshairs.stream().forEach( this::bindCrosshairToConfig );
+	}
+
+	public void bindCrosshairsToConfig( final Crosshair... crosshairs )
+	{
+		this.bindCrosshairsToConfig( Arrays.asList( crosshairs ) );
+	}
+
+	public void bindCrosshairToConfig( final Crosshair crosshair )
+	{
+		crosshair.highlightColorProperty().bind( this.onFocusColor );
+		crosshair.regularColorProperty().bind( this.outOfFocusColor );
+		crosshair.isVisibleProperty().bind( this.showCrosshairs );
 	}
 }

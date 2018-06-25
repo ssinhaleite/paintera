@@ -11,41 +11,26 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
-import java.util.function.Function;
-import java.util.function.LongFunction;
 import java.util.function.Supplier;
 
 import org.janelia.saalfeldlab.fx.ui.ExceptionNode;
 import org.janelia.saalfeldlab.fx.util.InvokeOnJavaFXApplicationThread;
-import org.janelia.saalfeldlab.n5.DataBlock;
 import org.janelia.saalfeldlab.n5.DataType;
 import org.janelia.saalfeldlab.n5.DatasetAttributes;
-import org.janelia.saalfeldlab.n5.GzipCompression;
-import org.janelia.saalfeldlab.n5.LongArrayDataBlock;
 import org.janelia.saalfeldlab.n5.N5Reader;
 import org.janelia.saalfeldlab.n5.N5Writer;
 import org.janelia.saalfeldlab.n5.imglib2.N5Utils;
 import org.janelia.saalfeldlab.paintera.N5Helpers;
-import org.janelia.saalfeldlab.paintera.PainteraBaseView;
 import org.janelia.saalfeldlab.paintera.composition.ARGBCompositeAlphaYCbCr;
 import org.janelia.saalfeldlab.paintera.composition.CompositeCopy;
-import org.janelia.saalfeldlab.paintera.control.assignment.FragmentSegmentAssignmentOnlyLocal;
 import org.janelia.saalfeldlab.paintera.control.assignment.FragmentSegmentAssignmentState;
+import org.janelia.saalfeldlab.paintera.control.lock.LockedSegmentsOnlyLocal;
 import org.janelia.saalfeldlab.paintera.control.selection.SelectedIds;
-import org.janelia.saalfeldlab.paintera.control.selection.SelectedSegments;
 import org.janelia.saalfeldlab.paintera.data.DataSource;
 import org.janelia.saalfeldlab.paintera.data.mask.Masks;
-import org.janelia.saalfeldlab.paintera.data.mask.TmpDirectoryCreator;
 import org.janelia.saalfeldlab.paintera.data.n5.CommitCanvasN5;
 import org.janelia.saalfeldlab.paintera.id.IdService;
 import org.janelia.saalfeldlab.paintera.id.N5IdService;
-import org.janelia.saalfeldlab.paintera.id.ToIdConverter;
-import org.janelia.saalfeldlab.paintera.meshes.InterruptibleFunction;
-import org.janelia.saalfeldlab.paintera.meshes.MeshInfos;
-import org.janelia.saalfeldlab.paintera.meshes.MeshManagerWithAssignmentForSegments;
-import org.janelia.saalfeldlab.paintera.meshes.ShapeKey;
-import org.janelia.saalfeldlab.paintera.meshes.cache.CacheUtils;
-import org.janelia.saalfeldlab.paintera.meshes.cache.SegmentMaskGenerators;
 import org.janelia.saalfeldlab.paintera.state.LabelSourceState;
 import org.janelia.saalfeldlab.paintera.state.RawSourceState;
 import org.janelia.saalfeldlab.paintera.stream.HighlightingStreamConverter;
@@ -54,15 +39,12 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import bdv.util.volatiles.SharedQueue;
-import gnu.trove.set.hash.TLongHashSet;
 import javafx.beans.binding.Bindings;
 import javafx.beans.binding.BooleanBinding;
 import javafx.beans.binding.ObjectBinding;
 import javafx.beans.binding.StringBinding;
 import javafx.beans.property.DoubleProperty;
 import javafx.beans.property.SimpleBooleanProperty;
-import javafx.beans.property.SimpleDoubleProperty;
-import javafx.beans.property.SimpleIntegerProperty;
 import javafx.beans.property.SimpleObjectProperty;
 import javafx.beans.property.SimpleStringProperty;
 import javafx.beans.property.StringProperty;
@@ -77,8 +59,6 @@ import javafx.scene.control.Button;
 import javafx.scene.control.ComboBox;
 import javafx.scene.layout.GridPane;
 import javafx.scene.layout.Priority;
-import net.imglib2.Cursor;
-import net.imglib2.Interval;
 import net.imglib2.RandomAccessibleInterval;
 import net.imglib2.Volatile;
 import net.imglib2.cache.img.CachedCellImg;
@@ -86,7 +66,6 @@ import net.imglib2.cache.ref.BoundedSoftRefLoaderCache;
 import net.imglib2.cache.util.LoaderCacheAsCacheAdapter;
 import net.imglib2.converter.ARGBColorConverter;
 import net.imglib2.converter.ARGBColorConverter.InvertingImp1;
-import net.imglib2.converter.Converter;
 import net.imglib2.img.cell.Cell;
 import net.imglib2.img.cell.CellGrid;
 import net.imglib2.realtransform.AffineTransform3D;
@@ -94,12 +73,10 @@ import net.imglib2.type.NativeType;
 import net.imglib2.type.label.LabelMultisetType;
 import net.imglib2.type.label.N5CacheLoader;
 import net.imglib2.type.label.VolatileLabelMultisetArray;
-import net.imglib2.type.logic.BoolType;
 import net.imglib2.type.numeric.IntegerType;
 import net.imglib2.type.numeric.RealType;
 import net.imglib2.type.numeric.integer.UnsignedLongType;
 import net.imglib2.type.volatiles.AbstractVolatileRealType;
-import net.imglib2.util.Pair;
 import net.imglib2.view.Views;
 
 public class GenericBackendDialogN5 implements BackendDialog
@@ -151,7 +128,7 @@ public class GenericBackendDialogN5 implements BackendDialog
 
 	private final StringBinding errorMessage = Bindings.createStringBinding(
 			() -> isReady.get() ? null : String.format( ERROR_MESSAGE_PATTERN, isN5Valid.get(), isDatasetValid.get(), datasetUpdateFailed.not().get() ),
-					isReady );
+			isReady );
 
 	private final StringBinding name = Bindings.createStringBinding( () -> {
 		final String[] entries = Optional
@@ -242,21 +219,21 @@ public class GenericBackendDialogN5 implements BackendDialog
 		dataset.set( "" );
 	}
 
-	public void updateDatasetInfo( final String dataset, final DatasetInfo info )
+	public void updateDatasetInfo( final String group, final DatasetInfo info )
 	{
 
-		LOG.debug( "Updating dataset info for dataset {}", dataset );
+		LOG.debug( "Updating dataset info for dataset {}", group );
 		try
 		{
 			final N5Reader n5 = this.n5.get();
-			final String ds = N5Helpers.isMultiScale( n5, dataset ) ? N5Helpers.getFinestLevel( n5, dataset ) : dataset;
-			LOG.debug( "Got dataset={}, ds={}", dataset, ds );
 
-			setResolution( N5Helpers.getResolution( n5, dataset ) );
-			setOffset( N5Helpers.getOffset( n5, dataset ) );
-			final DatasetAttributes dsAttrs = n5.getDatasetAttributes( ds );
-			this.datasetInfo.minProperty().set( Optional.ofNullable( n5.getAttribute( dataset, MIN_KEY, Double.class ) ).orElse( N5Helpers.minForType( dsAttrs.getDataType() ) ) );
-			this.datasetInfo.maxProperty().set( Optional.ofNullable( n5.getAttribute( dataset, MAX_KEY, Double.class ) ).orElse( N5Helpers.maxForType( dsAttrs.getDataType() ) ) );
+			setResolution( N5Helpers.getResolution( n5, group ) );
+			setOffset( N5Helpers.getOffset( n5, group ) );
+
+			final DataType dataType = N5Helpers.getDataType( n5, group );
+
+			this.datasetInfo.minProperty().set( Optional.ofNullable( n5.getAttribute( group, MIN_KEY, Double.class ) ).orElse( N5Helpers.minForType( dataType ) ) );
+			this.datasetInfo.maxProperty().set( Optional.ofNullable( n5.getAttribute( group, MAX_KEY, Double.class ) ).orElse( N5Helpers.maxForType( dataType ) ) );
 		}
 		catch ( final IOException e )
 		{
@@ -300,71 +277,9 @@ public class GenericBackendDialogN5 implements BackendDialog
 		return this.datasetInfo.maxProperty();
 	}
 
-	public FragmentSegmentAssignmentState assignments()
+	public FragmentSegmentAssignmentState assignments() throws IOException
 	{
-		final String dataset = this.dataset.get() + ".fragment-segment-assignment";
-
-		try
-		{
-			final N5Writer writer = n5.get();
-
-			final BiConsumer< long[], long[] > persister = ( keys, values ) -> {
-				if ( keys.length == 0 )
-				{
-					LOG.warn( "Zero length data, will not persist fragment-segment-assignment." );
-					return;
-				}
-				try
-				{
-					final DatasetAttributes attrs = new DatasetAttributes( new long[] { keys.length, 2 }, new int[] { keys.length, 1 }, DataType.UINT64, new GzipCompression() );
-					writer.createDataset( dataset, attrs );
-					final DataBlock< long[] > keyBlock = new LongArrayDataBlock( new int[] { keys.length, 1 }, new long[] { 0, 0 }, keys );
-					final DataBlock< long[] > valueBlock = new LongArrayDataBlock( new int[] { values.length, 1 }, new long[] { 0, 1 }, values );
-					writer.writeBlock( dataset, attrs, keyBlock );
-					writer.writeBlock( dataset, attrs, valueBlock );
-				}
-				catch ( final IOException e )
-				{
-					throw new RuntimeException( e );
-				}
-			};
-
-			final long[] keys;
-			final long[] values;
-			LOG.debug( "Found fragment segment assingment dataset {}? {}", dataset, writer.datasetExists( dataset ) );
-			if ( writer.datasetExists( dataset ) )
-			{
-				final DatasetAttributes attrs = writer.getDatasetAttributes( dataset );
-				final int numEntries = ( int ) attrs.getDimensions()[ 0 ];
-				keys = new long[ numEntries ];
-				values = new long[ numEntries ];
-				LOG.debug( "Found {} assignments", numEntries );
-				final RandomAccessibleInterval< UnsignedLongType > data = N5Utils.open( writer, dataset );
-
-				final Cursor< UnsignedLongType > keysCursor = Views.flatIterable( Views.hyperSlice( data, 1, 0l ) ).cursor();
-				for ( int i = 0; keysCursor.hasNext(); ++i )
-				{
-					keys[ i ] = keysCursor.next().get();
-				}
-
-				final Cursor< UnsignedLongType > valuesCursor = Views.flatIterable( Views.hyperSlice( data, 1, 1l ) ).cursor();
-				for ( int i = 0; valuesCursor.hasNext(); ++i )
-				{
-					values[ i ] = valuesCursor.next().get();
-				}
-			}
-			else
-			{
-				keys = new long[] {};
-				values = new long[] {};
-			}
-
-			return new FragmentSegmentAssignmentOnlyLocal( keys, values, persister );
-		}
-		catch ( final IOException e )
-		{
-			throw new RuntimeException( e );
-		}
+		return N5Helpers.assignments( n5.get(), this.dataset.get() );
 	}
 
 	public IdService idService()
@@ -375,22 +290,25 @@ public class GenericBackendDialogN5 implements BackendDialog
 			final String dataset = this.dataset.get();
 
 			final Long maxId = n5.getAttribute( dataset, "maxId", Long.class );
+			final boolean isPainteraData = N5Helpers.isPainteraDataset( n5, dataset );
 			final long actualMaxId;
 			if ( maxId == null )
 			{
+				final String ds = isPainteraData ? dataset + "/" + N5Helpers.PAINTERA_DATA_DATASET : dataset;
 				if ( isLabelMultisetType() )
 				{
 					LOG.debug( "Getting id service for label multisets" );
-					actualMaxId = maxIdLabelMultiset( n5, dataset );
+					actualMaxId = maxIdLabelMultiset( n5, ds );
 				}
 				else if ( isIntegerType() )
 				{
-					actualMaxId = maxId( n5, dataset );
+					actualMaxId = maxId( n5, ds );
 				}
 				else
 				{
 					return null;
 				}
+				n5.setAttribute( dataset, "maxId", actualMaxId );
 			}
 			else
 			{
@@ -523,7 +441,8 @@ public class GenericBackendDialogN5 implements BackendDialog
 			final int priority,
 			final Group meshesGroup,
 			final ExecutorService manager,
-			final ExecutorService workers ) throws Exception
+			final ExecutorService workers,
+			final String projectDirectory ) throws Exception
 	{
 		final N5Writer reader = n5.get();
 		final String dataset = this.dataset.get();
@@ -540,48 +459,31 @@ public class GenericBackendDialogN5 implements BackendDialog
 			source = ( DataSource< D, T > ) N5Helpers.openScalarAsSource( reader, dataset, transform, sharedQueue, priority, name );
 		}
 
-		final TmpDirectoryCreator canvasCacheDirUpdate = new TmpDirectoryCreator( null, null );
+		final Supplier< String > canvasCacheDirUpdate = Masks.canvasTmpDirDirectorySupplier( projectDirectory );
 
 		final DataSource< D, T > masked = Masks.mask( source, canvasCacheDirUpdate.get(), canvasCacheDirUpdate, commitCanvas(), workers );
+		final IdService idService = idService();
 		final FragmentSegmentAssignmentState assignment = assignments();
 		final SelectedIds selectedIds = new SelectedIds();
-		final SelectedSegments selectedSegments = new SelectedSegments( selectedIds, assignment );
-		final ModalGoldenAngleSaturatedHighlightingARGBStream stream = new ModalGoldenAngleSaturatedHighlightingARGBStream( selectedIds, assignment );
-		final HighlightingStreamConverter< T > converter = HighlightingStreamConverter.forType( stream, masked.getType() );
-		final InterruptibleFunction< Long, Interval[] >[] blockListCache = PainteraBaseView.generateLabelBlocksForLabelCache( masked, PainteraBaseView.scaleFactorsFromAffineTransforms( masked ) );
-		final LongFunction< Converter< D, BoolType > > getMaskGenerator = PainteraBaseView.equalsMaskForType( source.getDataType() );
-		final Function< TLongHashSet, Converter< D, BoolType > > segmentMaskGenerator = SegmentMaskGenerators.forType( source.getDataType() );
-		final InterruptibleFunction< ShapeKey< TLongHashSet >, Pair< float[], float[] > >[] meshCache = CacheUtils.segmentMeshCacheLoaders( source, segmentMaskGenerator, CacheUtils::toCacheSoftRefLoaderCache );
-
-		final MeshManagerWithAssignmentForSegments meshManager = new MeshManagerWithAssignmentForSegments(
-				source,
-				blockListCache,
-				meshCache,
-				meshesGroup,
+		final LockedSegmentsOnlyLocal lockedSegments = new LockedSegmentsOnlyLocal( locked -> {} );
+		final ModalGoldenAngleSaturatedHighlightingARGBStream stream = new ModalGoldenAngleSaturatedHighlightingARGBStream(
+				selectedIds,
 				assignment,
-				selectedSegments,
-				stream,
-				new SimpleIntegerProperty(),
-				new SimpleDoubleProperty(),
-				new SimpleIntegerProperty(),
-				manager,
-				workers );
-
-		final MeshInfos< TLongHashSet > meshInfos = new MeshInfos<>( selectedSegments, assignment, meshManager, masked.getNumMipmapLevels() );
+				lockedSegments );
+		final HighlightingStreamConverter< T > converter = HighlightingStreamConverter.forType( stream, masked.getType() );
 
 		return new LabelSourceState<>(
 				masked,
 				converter,
 				new ARGBCompositeAlphaYCbCr(),
 				name,
-				getMaskGenerator,
-				segmentMaskGenerator,
 				assignment,
-				ToIdConverter.fromType( masked.getDataType() ),
+				lockedSegments,
+				idService,
 				selectedIds,
-				idService(),
-				meshManager,
-				meshInfos );
+				meshesGroup,
+				manager,
+				workers );
 	}
 
 	public boolean isLabelType() throws Exception
@@ -591,7 +493,12 @@ public class GenericBackendDialogN5 implements BackendDialog
 
 	public boolean isLabelMultisetType() throws Exception
 	{
-		final Boolean attribute = getAttribute( LABEL_MULTISETTYPE_KEY, Boolean.class );
+		final N5Writer n5 = this.n5.get();
+		final String dataset = this.dataset.get();
+		final Boolean attribute = n5.getAttribute(
+				N5Helpers.isPainteraDataset( n5, dataset ) ? dataset + "/" + N5Helpers.PAINTERA_DATA_DATASET : dataset,
+				N5Helpers.LABEL_MULTISETTYPE_KEY,
+				Boolean.class );
 		LOG.debug( "Getting label multiset attribute: {}", attribute );
 		return Optional.ofNullable( attribute ).orElse( false );
 	}
@@ -634,28 +541,6 @@ public class GenericBackendDialogN5 implements BackendDialog
 		final String dataset = this.dataset.get();
 		final N5Writer writer = this.n5.get();
 		return new CommitCanvasN5( writer, dataset );
-	}
-
-	public < T > T getAttribute( final String key, final Class< T > clazz ) throws IOException
-	{
-		final N5Reader n5 = this.n5.get();
-		final String ds = this.dataset.get();
-
-		if ( n5.datasetExists( ds ) )
-		{
-			LOG.debug( "Getting attributes for {} and {}", n5, ds );
-			return n5.getAttribute( ds, key, clazz );
-		}
-
-		final String[] scaleDirs = N5Helpers.listAndSortScaleDatasets( n5, ds );
-
-		if ( scaleDirs.length > 0 )
-		{
-			LOG.warn( "Getting attributes for mipmap dataset: {} and {}", n5, scaleDirs[ 0 ] );
-			return n5.getAttribute( Paths.get( ds, scaleDirs[ 0 ] ).toString(), key, clazz );
-		}
-
-		throw new RuntimeException( String.format( "Cannot read dataset attributes for group %s and dataset %s.", n5, ds ) );
 	}
 
 	public ExecutorService propagationExecutor()

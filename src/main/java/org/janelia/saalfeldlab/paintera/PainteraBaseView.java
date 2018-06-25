@@ -15,6 +15,7 @@ import org.janelia.saalfeldlab.paintera.composition.CompositeProjectorPreMultipl
 import org.janelia.saalfeldlab.paintera.data.DataSource;
 import org.janelia.saalfeldlab.paintera.data.mask.MaskedSource;
 import org.janelia.saalfeldlab.paintera.meshes.InterruptibleFunction;
+import org.janelia.saalfeldlab.paintera.meshes.InterruptibleFunctionAndCache;
 import org.janelia.saalfeldlab.paintera.meshes.cache.CacheUtils;
 import org.janelia.saalfeldlab.paintera.meshes.cache.UniqueLabelListLabelMultisetCacheLoader;
 import org.janelia.saalfeldlab.paintera.state.GlobalTransformManager;
@@ -80,9 +81,9 @@ public class PainteraBaseView
 
 	private final ExecutorService generalPurposeExecutorService = Executors.newFixedThreadPool( 3, new NamedThreadFactory( "paintera-thread-%d" ) );
 
-	private final ExecutorService meshManagerExecutorService = Executors.newFixedThreadPool( 1, new NamedThreadFactory( "paintera-mesh-manager-%d" ) );
+	private final ExecutorService meshManagerExecutorService = Executors.newFixedThreadPool( 3, new NamedThreadFactory( "paintera-mesh-manager-%d" ) );
 
-	private final ExecutorService meshWorkerExecutorService = Executors.newFixedThreadPool( 3, new NamedThreadFactory( "paintera-mesh-worker-%d" ) );
+	private final ExecutorService meshWorkerExecutorService = Executors.newFixedThreadPool( 10, new NamedThreadFactory( "paintera-mesh-worker-%d" ) );
 
 	private final ExecutorService paintQueue = Executors.newFixedThreadPool( 1 );
 
@@ -185,6 +186,9 @@ public class PainteraBaseView
 
 		orthogonalViews().applyToAll( vp -> state.assignment().addListener( obs -> vp.requestRepaint() ) );
 		orthogonalViews().applyToAll( vp -> state.selectedIds().addListener( obs -> vp.requestRepaint() ) );
+		orthogonalViews().applyToAll( vp -> state.lockedSegments().addListener( obs -> vp.requestRepaint() ) );
+
+		state.meshManager().areMeshesEnabledProperty().bind( viewer3D.isMeshesEnabledProperty() );
 
 		sourceInfo.addState( state.getDataSource(), state );
 	}
@@ -221,13 +225,13 @@ public class PainteraBaseView
 		return this.generalPurposeExecutorService;
 	}
 
-	public static < D extends Type< D >, T extends Type< T > > InterruptibleFunction< Long, Interval[] >[] generateLabelBlocksForLabelCache(
+	public static < D, T > InterruptibleFunctionAndCache< Long, Interval[] >[] generateLabelBlocksForLabelCache(
 			final DataSource< D, T > spec )
 	{
 		return generateLabelBlocksForLabelCache( spec, scaleFactorsFromAffineTransforms( spec ) );
 	}
 
-	public static < D extends Type< D >, T extends Type< T > > InterruptibleFunction< Long, Interval[] >[] generateLabelBlocksForLabelCache(
+	public static < D, T > InterruptibleFunctionAndCache< Long, Interval[] >[] generateLabelBlocksForLabelCache(
 			final DataSource< D, T > spec,
 			final double[][] scalingFactors )
 	{
@@ -235,20 +239,20 @@ public class PainteraBaseView
 		final boolean isLabelMultisetType = spec.getDataType() instanceof LabelMultisetType;
 		final boolean isCachedCellImg = ( isMaskedSource
 				? ( ( MaskedSource< ?, ? > ) spec ).underlyingSource().getDataSource( 0, 0 )
-						: spec.getDataSource( 0, 0 ) ) instanceof CachedCellImg< ?, ? >;
+				: spec.getDataSource( 0, 0 ) ) instanceof CachedCellImg< ?, ? >;
 
 		if ( isLabelMultisetType && isCachedCellImg )
 		{
 			@SuppressWarnings( "unchecked" )
 			final DataSource< LabelMultisetType, T > source =
-			( DataSource< LabelMultisetType, T > ) ( isMaskedSource ? ( ( MaskedSource< ?, ? > ) spec ).underlyingSource() : spec );
+					( DataSource< LabelMultisetType, T > ) ( isMaskedSource ? ( ( MaskedSource< ?, ? > ) spec ).underlyingSource() : spec );
 			return generateBlocksForLabelCacheLabelMultisetTypeCachedImg( source, scalingFactors );
 		}
 
 		return generateLabelBlocksForLabelCacheGeneric( spec, scalingFactors, collectLabels( spec.getDataType() ) );
 	}
 
-	private static < D extends Type< D >, T extends Type< T > > InterruptibleFunction< Long, Interval[] >[] generateLabelBlocksForLabelCacheGeneric(
+	private static < D, T > InterruptibleFunctionAndCache< Long, Interval[] >[] generateLabelBlocksForLabelCacheGeneric(
 			final DataSource< D, T > spec,
 			final double[][] scalingFactors,
 			final BiConsumer< D, TLongHashSet > collectLabels )
@@ -262,7 +266,7 @@ public class PainteraBaseView
 				collectLabels,
 				CacheUtils::toCacheSoftRefLoaderCache );
 
-		final InterruptibleFunction< Long, Interval[] >[] blocksForLabelCache = CacheUtils.blocksForLabelCachesLongKeys(
+		final InterruptibleFunctionAndCache< Long, Interval[] >[] blocksForLabelCache = CacheUtils.blocksForLabelCachesLongKeys(
 				spec,
 				uniqueLabelLoaders,
 				blockSizes,
@@ -273,7 +277,7 @@ public class PainteraBaseView
 
 	}
 
-	private static < T extends Type< T > > InterruptibleFunction< Long, Interval[] >[] generateBlocksForLabelCacheLabelMultisetTypeCachedImg(
+	private static < T > InterruptibleFunctionAndCache< Long, Interval[] >[] generateBlocksForLabelCacheLabelMultisetTypeCachedImg(
 			final DataSource< LabelMultisetType, T > spec,
 			final double[][] scalingFactors )
 	{
@@ -295,7 +299,7 @@ public class PainteraBaseView
 			blockSizes[ level ] = IntStream.range( 0, grid.numDimensions() ).map( grid::cellDimension ).toArray();
 		}
 
-		final InterruptibleFunction< Long, Interval[] >[] blocksForLabelCache = CacheUtils.blocksForLabelCachesLongKeys(
+		final InterruptibleFunctionAndCache< Long, Interval[] >[] blocksForLabelCache = CacheUtils.blocksForLabelCachesLongKeys(
 				spec,
 				uniqueLabelLoaders,
 				blockSizes,

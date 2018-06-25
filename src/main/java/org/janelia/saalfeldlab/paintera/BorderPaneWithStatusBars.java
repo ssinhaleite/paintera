@@ -1,21 +1,21 @@
 package org.janelia.saalfeldlab.paintera;
 
 import java.lang.invoke.MethodHandles;
-import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
 import java.util.function.BiConsumer;
+import java.util.function.Supplier;
 
-import org.janelia.saalfeldlab.fx.event.KeyTracker;
 import org.janelia.saalfeldlab.fx.ortho.OrthogonalViews;
 import org.janelia.saalfeldlab.fx.ortho.OrthogonalViews.ViewerAndTransforms;
 import org.janelia.saalfeldlab.fx.ui.ResizeOnLeftSide;
 import org.janelia.saalfeldlab.fx.util.InvokeOnJavaFXApplicationThread;
-import org.janelia.saalfeldlab.paintera.config.CrosshairConfig;
 import org.janelia.saalfeldlab.paintera.config.CrosshairConfigNode;
-import org.janelia.saalfeldlab.paintera.config.OrthoSliceConfig;
+import org.janelia.saalfeldlab.paintera.config.NavigationConfigNode;
 import org.janelia.saalfeldlab.paintera.config.OrthoSliceConfigNode;
+import org.janelia.saalfeldlab.paintera.config.Viewer3DConfigNode;
 import org.janelia.saalfeldlab.paintera.control.navigation.CoordinateDisplayListener;
 import org.janelia.saalfeldlab.paintera.state.SourceInfo;
 import org.janelia.saalfeldlab.paintera.ui.Crosshair;
@@ -30,10 +30,14 @@ import bdv.fx.viewer.ViewerPanelFX;
 import bdv.viewer.Source;
 import javafx.beans.binding.Bindings;
 import javafx.beans.property.BooleanProperty;
+import javafx.beans.property.ObjectProperty;
 import javafx.beans.property.ReadOnlyBooleanProperty;
 import javafx.beans.property.SimpleBooleanProperty;
 import javafx.beans.value.ObservableObjectValue;
+import javafx.event.ActionEvent;
+import javafx.event.EventHandler;
 import javafx.scene.Group;
+import javafx.scene.control.Button;
 import javafx.scene.control.CheckBox;
 import javafx.scene.control.Label;
 import javafx.scene.control.ScrollPane;
@@ -70,16 +74,21 @@ public class BorderPaneWithStatusBars
 
 	private final ResizeOnLeftSide resizeSideBar;
 
-	private final CrosshairConfig crosshairConfig = new CrosshairConfig();
+	private final NavigationConfigNode navigationConfigNode = new NavigationConfigNode();
 
-	@SuppressWarnings( "unused" )
+	private final CrosshairConfigNode crosshairConfigNode = new CrosshairConfigNode();
+
+	private final OrthoSliceConfigNode orthoSliceConfigNode = new OrthoSliceConfigNode();
+
+	private final Viewer3DConfigNode viewer3DConfigNode = new Viewer3DConfigNode();
+
 	private final Map< ViewerAndTransforms, Crosshair > crossHairs;
-
-	private final OrthoSliceConfig orthoSliceConfig;
 
 	private final Map< ViewerAndTransforms, OrthoSliceFX > orthoSlices;
 
 	private final ObservableObjectValue< ViewerAndTransforms > currentFocusHolderWithState;
+
+	private final Button saveProjectButton;
 
 	public final ObservableObjectValue< ViewerAndTransforms > currentFocusHolder()
 	{
@@ -106,14 +115,14 @@ public class BorderPaneWithStatusBars
 		InvokeOnJavaFXApplicationThread.invoke( () -> valueStatus.setText( s ) );
 	}
 
-	public Collection< OrthoSliceFX > orthoSlices()
+	public Map< ViewerAndTransforms, OrthoSliceFX > orthoSlices()
 	{
-		return this.orthoSlices.values();
+		return Collections.unmodifiableMap( this.orthoSlices );
 	}
 
 	public BorderPaneWithStatusBars(
 			final PainteraBaseView center,
-			final KeyTracker keyTracker )
+			final Supplier< String > project )
 	{
 		LOG.debug( "Construction {}", BorderPaneWithStatusBars.class.getName() );
 		this.pane = new BorderPane( center.orthogonalViews().pane() );
@@ -130,17 +139,8 @@ public class BorderPaneWithStatusBars
 
 		final HBox statusDisplays = new HBox( 5, viewerCoordinateStatus, worldCoordinateStatus, valueStatus );
 
-		this.crossHairs = makeCrosshairs( center.orthogonalViews(), crosshairConfig, Colors.CREMI, Color.WHITE.deriveColor( 0, 1, 1, 0.5 ) );
-
+		this.crossHairs = makeCrosshairs( center.orthogonalViews(), Colors.CREMI, Color.WHITE.deriveColor( 0, 1, 1, 0.5 ) );
 		this.orthoSlices = makeOrthoSlices( center.orthogonalViews(), center.viewer3D().meshesGroup(), center.sourceInfo() );
-		this.orthoSliceConfig = new OrthoSliceConfig(
-				orthoSlices.get( center.orthogonalViews().topLeft() ),
-				orthoSlices.get( center.orthogonalViews().topRight() ),
-				orthoSlices.get( center.orthogonalViews().bottomLeft() ),
-				center.orthogonalViews().topLeft().viewer().visibleProperty(),
-				center.orthogonalViews().topRight().viewer().visibleProperty(),
-				center.orthogonalViews().bottomLeft().viewer().visibleProperty(),
-				center.sourceInfo().hasVisibleSources() );
 
 		center.sourceInfo().currentNameProperty().addListener( ( obs, oldv, newv ) -> {
 			currentSourceStatus.textProperty().unbind();
@@ -188,12 +188,16 @@ public class BorderPaneWithStatusBars
 		sourcesContents.setExpanded( false );
 
 		final VBox settingsContents = new VBox(
-				new CrosshairConfigNode( crosshairConfig ).getContents(),
-				new OrthoSliceConfigNode( orthoSliceConfig ).getContents() );
+				this.navigationConfigNode.getContents(),
+				this.crosshairConfigNode.getContents(),
+				this.orthoSliceConfigNode.getContents(),
+				this.viewer3DConfigNode.getContents() );
 		final TitledPane settings = new TitledPane( "settings", settingsContents );
 		settings.setExpanded( false );
 
-		this.sideBar = new ScrollPane( new VBox( sourcesContents, settings ) );
+		saveProjectButton = new Button( "Save" );
+
+		this.sideBar = new ScrollPane( new VBox( sourcesContents, settings, saveProjectButton ) );
 		this.sideBar.setHbarPolicy( ScrollBarPolicy.NEVER );
 		this.sideBar.setVbarPolicy( ScrollBarPolicy.AS_NEEDED );
 		this.sideBar.setVisible( true );
@@ -219,33 +223,31 @@ public class BorderPaneWithStatusBars
 		}
 	}
 
+	public ObjectProperty< EventHandler< ActionEvent > > saveProjectButtonOnActionProperty()
+	{
+		return this.saveProjectButton.onActionProperty();
+	}
+
 	public static Map< ViewerAndTransforms, Crosshair > makeCrosshairs(
 			final OrthogonalViews< ? > views,
-			final CrosshairConfig config,
 			final Color onFocusColor,
 			final Color offFocusColor )
 	{
 		final Map< ViewerAndTransforms, Crosshair > map = new HashMap<>();
-		map.put( views.topLeft(), makeCrossHairForViewer( views.topLeft().viewer(), config, onFocusColor, offFocusColor ) );
-		map.put( views.topRight(), makeCrossHairForViewer( views.topRight().viewer(), config, onFocusColor, offFocusColor ) );
-		map.put( views.bottomLeft(), makeCrossHairForViewer( views.bottomLeft().viewer(), config, onFocusColor, offFocusColor ) );
-		config.setOnFocusColor( onFocusColor );
-		config.setOutOfFocusColor( offFocusColor );
+		map.put( views.topLeft(), makeCrossHairForViewer( views.topLeft().viewer(), onFocusColor, offFocusColor ) );
+		map.put( views.topRight(), makeCrossHairForViewer( views.topRight().viewer(), onFocusColor, offFocusColor ) );
+		map.put( views.bottomLeft(), makeCrossHairForViewer( views.bottomLeft().viewer(), onFocusColor, offFocusColor ) );
 		return map;
 	}
 
 	public static Crosshair makeCrossHairForViewer(
 			final ViewerPanelFX viewer,
-			final CrosshairConfig config,
 			final Color onFocusColor,
 			final Color offFocusColor )
 	{
 		final Crosshair ch = new Crosshair();
 		viewer.getDisplay().addOverlayRenderer( ch );
-		ch.regularColorProperty().bind( config.outOfFocusColorProperty() );
-		ch.highlightColorProperty().bind( config.onFocusColorProperty() );
 		ch.wasChangedProperty().addListener( ( obs, oldv, newv ) -> viewer.getDisplay().drawOverlays() );
-		ch.isVisibleProperty().bind( config.showCrosshairsProperty() );
 		ch.isHighlightProperty().bind( viewer.focusedProperty() );
 		return ch;
 	}
@@ -279,6 +281,31 @@ public class BorderPaneWithStatusBars
 				focusTR,
 				focusBL );
 
+	}
+
+	public NavigationConfigNode navigationConfigNode()
+	{
+		return this.navigationConfigNode;
+	}
+
+	public CrosshairConfigNode crosshairConfigNode()
+	{
+		return this.crosshairConfigNode;
+	}
+
+	public OrthoSliceConfigNode orthoSliceConfigNode()
+	{
+		return this.orthoSliceConfigNode;
+	}
+
+	public Viewer3DConfigNode viewer3DConfigNode()
+	{
+		return this.viewer3DConfigNode;
+	}
+
+	public Map< ViewerAndTransforms, Crosshair > crosshairs()
+	{
+		return Collections.unmodifiableMap( crossHairs );
 	}
 
 }

@@ -21,11 +21,13 @@ import java.lang.invoke.MethodHandles;
 import org.janelia.saalfeldlab.fx.ObservableWithListenersList;
 import org.janelia.saalfeldlab.paintera.control.assignment.FragmentSegmentAssignment;
 import org.janelia.saalfeldlab.paintera.control.assignment.FragmentSegmentAssignmentState;
+import org.janelia.saalfeldlab.paintera.control.lock.LockedSegments;
 import org.janelia.saalfeldlab.paintera.control.selection.SelectedIds;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import gnu.trove.impl.Constants;
+import gnu.trove.map.TLongIntMap;
 import gnu.trove.map.hash.TLongIntHashMap;
 import javafx.beans.property.BooleanProperty;
 import javafx.beans.property.SimpleBooleanProperty;
@@ -41,6 +43,14 @@ import net.imglib2.type.label.Label;
 public abstract class AbstractHighlightingARGBStream extends ObservableWithListenersList implements ARGBStream
 {
 
+	private static final int ZERO = 0x00000000;
+
+	public static int DEFAULT_ALPHA = 0x20000000;
+
+	public static int DEFAULT_ACTIVE_FRAGMENT_ALPHA = 0xd0000000;
+
+	public static int DEFAULT_ACTIVE_SEGMENT_ALPHA = 0x80000000;
+
 	private static final Logger LOG = LoggerFactory.getLogger( MethodHandles.lookup().lookupClass() );
 
 	final static protected double[] rs = new double[] { 1, 1, 0, 0, 0, 1, 1 };
@@ -49,28 +59,36 @@ public abstract class AbstractHighlightingARGBStream extends ObservableWithListe
 
 	final static protected double[] bs = new double[] { 0, 0, 0, 1, 1, 1, 0 };
 
-	private static final int ZERO = 0x00000000;
-
 	protected long seed = 0;
 
-	protected int alpha = 0x20000000;
+	protected int alpha = DEFAULT_ALPHA;
 
-	protected int activeFragmentAlpha = 0xd0000000;
+	protected int activeFragmentAlpha = DEFAULT_ACTIVE_FRAGMENT_ALPHA;
 
-	protected int activeSegmentAlpha = 0x80000000;
+	protected int activeSegmentAlpha = DEFAULT_ACTIVE_SEGMENT_ALPHA;
 
-	protected int invalidSegmentAlpha = 0x00000000;
+	protected int invalidSegmentAlpha = ZERO;
+
+	protected boolean hideLockedSegments = true;
 
 	protected SelectedIds highlights;
 
 	protected FragmentSegmentAssignment assignment;
 
+	protected LockedSegments lockedSegments;
+
 	private final BooleanProperty colorFromSegmentId = new SimpleBooleanProperty();
 
-	public AbstractHighlightingARGBStream( final SelectedIds highlights, final FragmentSegmentAssignmentState assignment )
+	protected final TLongIntHashMap explicitlySpecifiedColors = new TLongIntHashMap();
+
+	public AbstractHighlightingARGBStream(
+			final SelectedIds highlights,
+			final FragmentSegmentAssignmentState assignment,
+			final LockedSegments lockedSegments )
 	{
 		this.highlights = highlights;
 		this.assignment = assignment;
+		this.lockedSegments = lockedSegments;
 		this.colorFromSegmentId.addListener( ( obs, oldv, newv ) -> stateChanged() );
 	}
 
@@ -114,6 +132,12 @@ public abstract class AbstractHighlightingARGBStream extends ObservableWithListe
 		return false;
 	}
 
+	public boolean isLockedSegment( final long id )
+	{
+		final long segment = this.assignment.getSegment( id );
+		return this.lockedSegments.isLocked( segment );
+	}
+
 	final static protected int argb( final int r, final int g, final int b, final int alpha )
 	{
 		return ( r << 8 | g ) << 8 | b | alpha;
@@ -141,8 +165,11 @@ public abstract class AbstractHighlightingARGBStream extends ObservableWithListe
 	 */
 	public void setSeed( final long seed )
 	{
-		this.seed = seed;
-		stateChanged();
+		if ( this.seed != seed )
+		{
+			this.seed = seed;
+			stateChanged();
+		}
 	}
 
 	/**
@@ -177,8 +204,11 @@ public abstract class AbstractHighlightingARGBStream extends ObservableWithListe
 	 */
 	public void setAlpha( final int alpha )
 	{
-		this.alpha = ( alpha & 0xff ) << 24;
-		stateChanged();
+		if ( getAlpha() != alpha )
+		{
+			this.alpha = ( alpha & 0xff ) << 24;
+			stateChanged();
+		}
 	}
 
 	/**
@@ -189,20 +219,29 @@ public abstract class AbstractHighlightingARGBStream extends ObservableWithListe
 	 */
 	public void setActiveSegmentAlpha( final int alpha )
 	{
-		this.activeSegmentAlpha = ( alpha & 0xff ) << 24;
-		stateChanged();
+		if ( getActiveSegmentAlpha() != alpha )
+		{
+			this.activeSegmentAlpha = ( alpha & 0xff ) << 24;
+			stateChanged();
+		}
 	}
 
 	public void setInvalidSegmentAlpha( final int alpha )
 	{
-		this.invalidSegmentAlpha = ( alpha & 0xff ) << 24;
-		stateChanged();
+		if ( getInvalidSegmentAlpha() != alpha )
+		{
+			this.invalidSegmentAlpha = ( alpha & 0xff ) << 24;
+			stateChanged();
+		}
 	}
 
 	public void setActiveFragmentAlpha( final int alpha )
 	{
-		this.activeFragmentAlpha = ( alpha & 0xff ) << 24;
-		stateChanged();
+		if ( getActiveFragmentAlpha() != alpha )
+		{
+			this.activeFragmentAlpha = ( alpha & 0xff ) << 24;
+			stateChanged();
+		}
 	}
 
 	public int getAlpha()
@@ -229,7 +268,12 @@ public abstract class AbstractHighlightingARGBStream extends ObservableWithListe
 	{
 		LOG.debug( "Before clearing cache: {}", argbCache );
 		argbCache.clear();
+		argbCache.putAll( this.explicitlySpecifiedColors );
 		LOG.debug( "After clearing cache: {}", argbCache );
+		// TODO is this stateChanged bad here?
+		// stateChanged() probably triggers a re-render, which calls clearCache,
+		// which calls stateChanged, which ...
+		// need to check if this is true
 		stateChanged();
 	}
 
@@ -260,13 +304,84 @@ public abstract class AbstractHighlightingARGBStream extends ObservableWithListe
 		clearCache();
 	}
 
-	public void setHighlightsAndAssignment(
+	public void setLockedSegments( final LockedSegments lockedSegments )
+	{
+		this.lockedSegments = lockedSegments;
+		clearCache();
+	}
+
+	public void setHighlightsAndAssignmentAndLockedSegments(
 			final SelectedIds highlights,
-			final FragmentSegmentAssignment assignment )
+			final FragmentSegmentAssignment assignment,
+			final LockedSegments lockedSegments )
 	{
 		this.highlights = highlights;
 		this.assignment = assignment;
+		this.lockedSegments = lockedSegments;
 		clearCache();
+	}
+
+	public void setHideLockedSegments( final boolean hideLockedSegments )
+	{
+		if ( hideLockedSegments != this.hideLockedSegments )
+		{
+			this.hideLockedSegments = hideLockedSegments;
+			stateChanged();
+		}
+	}
+
+	public boolean getHideLockedSegments()
+	{
+		return this.hideLockedSegments;
+	}
+
+	public void specifyColorExplicitly( final long segmentId, final int color )
+	{
+		this.explicitlySpecifiedColors.put( segmentId, color );
+		clearCache();
+	}
+
+	public void specifyColorsExplicitly( final long[] segmentIds, final int[] colors )
+	{
+		LOG.debug( "Specifying segmentIds {} and colors {}", segmentIds, colors );
+		for ( int i = 0; i < segmentIds.length; ++i )
+		{
+			this.explicitlySpecifiedColors.put( segmentIds[ i ], colors[ i ] );
+		}
+		clearCache();
+	}
+
+	public void removeExplicitColor( final long segmentId )
+	{
+		LOG.debug( "Removing color {} from {}", segmentId, this.explicitlySpecifiedColors );
+		if ( this.explicitlySpecifiedColors.contains( segmentId ) )
+		{
+			LOG.debug( "Map contains colors: Removing color {} from {}", segmentId, this.explicitlySpecifiedColors );
+			this.explicitlySpecifiedColors.remove( segmentId );
+			clearCache();
+		}
+	}
+
+	public void removeExplicitColors( final long[] segmentIds )
+	{
+		boolean notifyStateChanged = false;
+		for ( final long id : segmentIds )
+		{
+			if ( this.explicitlySpecifiedColors.contains( id ) )
+			{
+				this.explicitlySpecifiedColors.remove( id );
+				notifyStateChanged = true;
+			}
+		}
+		if ( notifyStateChanged )
+		{
+			clearCache();
+		}
+	}
+
+	public TLongIntMap getExplicitlySpecifiedColorsCopy()
+	{
+		return new TLongIntHashMap( this.explicitlySpecifiedColors );
 	}
 
 }
