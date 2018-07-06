@@ -75,6 +75,7 @@ Usage: Paintera [-h] [--height=HEIGHT] [--width=WIDTH]
 | `Space` right click/drag | Erase within canvas only |
 | `Shift` + `Space` right click/drag | Paint background label |
 | `Space` wheel | change brush size |
+| `F` + left click | 2D Flood-fill in current viewer plane with id that was last toggled active (if any) |
 | `Shift` + `F` + left click | Flood-fill with id that was last toggled active (if any) |
 | `N` | Select new, previously unused id |
 | `Ctrl` + `C` | Show dialog to commit canvas and/or assignments |
@@ -85,6 +86,7 @@ Usage: Paintera [-h] [--height=HEIGHT] [--width=WIDTH]
 | `Shift` + `V` | Toggle visibility of not-selected ids in current source (if label source) |
 | `R` | Clear mesh caches and refresh meshes (if current source is label source) |
 | `L` | Lock last selected segment (if label source) |
+| `Ctrl` + `S` | Save current project state |
 
 ## Data
 
