@@ -1,4 +1,8 @@
+[![Build Status](https://travis-ci.org/saalfeldlab/paintera.svg?branch=master)](https://travis-ci.org/saalfeldlab/paintera)
+
 # Paintera
+
+**IMPORTANT NOTE** If you [install Paintera through conda](https://github.com/saalfeldlab/paintera#install) you will have to use your system Java and JavaFX to be able to run Paintera because there is no JavaFX package on conda at the moment.
 
 TBD
 
@@ -33,17 +37,49 @@ or, to generate a "fat jar" with all dependencies added, run:
 ```shell
 mvn -Pfat clean package
 ```
+This will include `org.slf4j:slf4j-simple` as `slf4j` binding.
+
+## Install
+```bash
+conda install -c hanslovsky paintera
+```
 
 ## Run
-
-```shell
-java -Xmx16G -XX:+UseConcMarkSweepGC -jar target/paintera-0.1.0-SNAPSHOT-shaded.jar
+```bash
+paintera [[JRUN ARG...] [JVM ARG...] --] [ARG...]
 ```
-Replace `16G` with the maximum amount of memory that Paintera should use.
+Jrun/JVM args are separated by `--`. The default max heap size is half the available system memory. To change the heap size, run
+```bash
+paintera -Xmx<size> -- [ARG...]
+```
+or
+```bash
+PAINTERA_MAX_HEAP_SIZE=<size> paintera [ARG...]
+```
+
+By default, `org.slf4j:slf4j-simple` is used as `slf4j` binding for logging. This can be replaced by setting the `PAINTERA_SLF4J_BINDING` environment variable:
+```bash
+PAINTERA_SLF4J_BINDING=groupId:artifactId[:version]
+```
+For example, to replace `org.slf4j:slf4j-simple` with `ch.qos.logback:logback-classic`, run (on Linux/OSX):
+```
+PAINTERA_SLF4J_BINDING=ch.qos.logback:logback-classic paintera
+```
+
+You can also run a [compiled fat jar](https://github.com/saalfeldlab/paintera/#compile)
+```shell
+java <java-opts> -jar target/paintera-0.1.2-SNAPSHOT-shaded.jar
+```
+We recommend these Java options:
+
+|Option| Description|
+| ---- | ---------- |
+| -Xmx16G | Maximum Java heap space (replace 16G with desired amount) |
+| -XX:+UseConcMarkSweepGC | concurrent garbage collector generally better for UI applications |
 
 #### Display help message and command line parameters
 ```shell
-$ java -jar target/paintera-0.1.0-SNAPSHOT-shaded.jar --help
+$ java -jar target/paintera-0.1.1-SNAPSHOT-shaded.jar --help
 Usage: Paintera [-h] [--height=HEIGHT] [--width=WIDTH]
                 [--label-source=LABEL_SOURCE]... [--raw-source=RAW_SOURCE]...
       --height=HEIGHT   Initial height of viewer. Defaults to 600.
@@ -99,28 +135,13 @@ These restrictions hold only for the graphical user interface. If desired, calle
 Accept any of these:
  1. any regular (i.e. default mode) three-dimensional N5 dataset that is integer or float. Optional attributes are `"resolution": [x,y,z]` and `"offset": [x,y,z]`.
  2. any multiscale N5 group that has `"multiScale" : true` attribute and contains three-dimensional multi-scale datasets `s0` ... `sN`. Optional attributes are `"resolution": [x,y,z]` and `"offset: [x,y,z]"`. In addition to the requirements from (1), all `s1` ... `sN` datasets must contain `"downsamplingFactors": [x,y,z]` entry (`s0` is exempt, will default to `[1.0, 1.0, 1.0]`). All datasets must have same type. Optional attributes from (1) will be ignored.
- 3. (preferred) any N5 group with attribute `"painteraData : {"type" : "raw"}` and a dataset/group `data` that conforms with (1) or (2).
+ 3. (preferred) any N5 group with attribute `"painteraData : {"type" : "raw"}` and a dataset/group `data` that conforms with (2).
 
 ### Labels
 Accept any of these:
- 1. any regular (i.e. default mode) integer or varlength `LabelMultisetType` (`"isLabelMultiset": true`) three-dimensional N5 dataset. Optional attributes are `"resolution": [x,y,z]`, `"offset": [x,y,z]`, `"maxId": <id>`. If `"maxId"` is not specified, it is determined at start-up and added.
- 2. any multiscale N5 group that has `"multiScale" : true` attribute and contains three-dimensional multi-scale datasets `s0` ... `sN`. Optional attributes are `"resolution": [x,y,z]`, `"offset": [x,y,z]`, `"maxId": <id>`. If `"maxId"` is not specified, it is determined at start-up and added (this can be expensive). In addition to the requirements from (1), all `s1` ... `sN` datasets must contain `"downsamplingFactors": [x,y,z]` entry (`s0` is exempt, will default to `[1.0, 1.0, 1.0]`). All datasets must have same type. Optional attributes from (1) will be ignored.
- 3. (preferred) any N5 group with attribute `"painteraData : {"type" : "label"}` and a dataset/group `data` that conforms with (1) or (2). Optional sub-groups are:
+ 1. any regular (i.e. default mode) integer or varlength `LabelMultisetType` (`"isLabelMultiset": true`) three-dimensional N5 dataset. Required attributes are `"maxId": <id>`. Optional attributes are `"resolution": [x,y,z]`, `"offset": [x,y,z]`.
+ 2. any multiscale N5 group that has `"multiScale" : true` attribute and contains three-dimensional multi-scale datasets `s0` ... `sN`. Required attributes are `"maxId": <id>`. Optional attributes are `"resolution": [x,y,z]`, `"offset": [x,y,z]`, `"maxId": <id>`. If `"maxId"` is not specified, it is determined at start-up and added (this can be expensive). In addition to the requirements from (1), all `s1` ... `sN` datasets must contain `"downsamplingFactors": [x,y,z]` entry (`s0` is exempt, will default to `[1.0, 1.0, 1.0]`). All datasets must have same type. Optional attributes from (1) will be ignored.
+ 3. (preferred) any N5 group with attribute `"painteraData : {"type" : "label"}` and a dataset/group `data` that conforms with (2). Required attributes are `"maxId": <id>`. Optional sub-groups are:
    - `fragment-segment-assignment` -- Dataset to store fragment-segment lookup table. Can be empty or will be initialized empty if it does not exist.
-   - `unique-label-lists`          -- Multiscale varlength dataset with same 'dimensions'/'blockSize' and as dataset(s) in `data`. Holds unique block lists from which relevant blocks for specific ids are retrieved.
-
-#### Things to consider for labels:
- - make `"maxId"` attribute mandatory because `IdService` needs it and would require to scan whole dataset (can be huge)
- - Efficient mesh generation
-  - only possible if
-    - option (3) and `unique-label-lists` exists, or
-    - `LabelMultisetType` dataset (currently, `VolatileLabelMultisetArray` holds a set of contained labels).
-  - If none of these are true, ask user if
-    - unique label lists should be generated from highest resolution to lowest resolution (slow, would need to be generated once and cached or saved as `unique-label-lists` if option (3), probably useful for looking at small datasets), or
-    - generate unique label lists on the fly from lowest resolution to highest resolution (fast, only do the work that's currently necessary, but potentially incomplete), or
-    - 3D support should be disabled for that source.
- - If (1) or (2), fragment-segment-assignment cannot be committed back to source (only stored as actions in project's `attributes.json`). There should be an option to export fragment-segment-assignment as N5 dataset. That way, users can choose to update their source in order to conform with (3) and not lose their work on fragment-segment assignments
- - (3) leaves room for adding related data in the future, e.g. annotations
-
-
-
+   - `label-to-block-mapping`      -- Multiscale directory tree with one text files per id mapping ids to containing label: `label-to-block-mapping/s<scale-level>/<id>`. If not present, no meshes will be generated.
+   - `unique-labels`               -- Multiscale N5 group holding unique label lists per block. If not present (or not using `N5FS`), meshes will not be updated when commiting canvas.
